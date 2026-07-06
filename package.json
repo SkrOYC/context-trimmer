@@ -1,0 +1,22 @@
+{
+  "name": "pi-context-trimmer",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "bun test"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.80.3",
+    "@types/bun": "latest",
+    "typebox": "^1.3.4"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}
