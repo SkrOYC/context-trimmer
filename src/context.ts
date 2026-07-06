@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { ArchivedResult } from "./types";
 import type { ArchiveState } from "./state";
 import { findSupersededArchives } from "./supersession";
+import { getEvictionContext, selectEvictionCandidates } from "./eviction";
 
 export function createContextHandler(pi: ExtensionAPI, state: ArchiveState) {
   const { activeArchives, archivesByPath, rebuildState } = state;
@@ -10,9 +11,18 @@ export function createContextHandler(pi: ExtensionAPI, state: ArchiveState) {
     try {
       rebuildState(ctx);
 
-      // Compute superseded reads in one pass. Replacements are batched so the
-      // KV-cache miss is paid once, and the next turn sees a stable prefix.
+      // Compute superseded reads and pressure-based eviction candidates in one
+      // pass. Replacements are batched so the KV-cache miss is paid once, and
+      // the next turn sees a stable prefix.
       const superseded = findSupersededArchives(event.messages, archivesByPath);
+      const toReplace = selectEvictionCandidates(
+        event.messages,
+        archivesByPath,
+        activeArchives,
+        getEvictionContext(ctx),
+        superseded,
+        ctx.cwd
+      );
 
       // Build a reverse lookup from toolCallId to archive for fast replacement.
       const archiveByToolCallId = new Map<string, ArchivedResult>();
@@ -26,7 +36,7 @@ export function createContextHandler(pi: ExtensionAPI, state: ArchiveState) {
         const arc = archiveByToolCallId.get(msg.toolCallId);
         if (!arc) return msg;
 
-        if (superseded.has(arc.pointerId)) {
+        if (toReplace.has(arc.pointerId)) {
           return {
             ...msg,
             content: [{

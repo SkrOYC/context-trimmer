@@ -63,11 +63,17 @@ describe("Pi Context Trimmer Extension", () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  async function loadExtension() {
+  async function loadExtension(contextUsage?: { tokens: number; contextWindow: number; percent: number }) {
     const extensionPath = path.resolve("./src/index.ts");
     const result = await discoverAndLoadExtensions([extensionPath], tempDir, tempDir);
     const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-    runner.bindCore(extensionActions, extensionContextActions);
+
+    const customExtensionContextActions = {
+      ...extensionContextActions,
+      getContextUsage: () => contextUsage ?? undefined,
+    };
+
+    runner.bindCore(extensionActions, customExtensionContextActions);
     await runner.emit({ type: "session_start", reason: "startup" });
     return { result, runner };
   }
@@ -360,6 +366,75 @@ describe("Pi Context Trimmer Extension", () => {
     expect(((compiled[1] as any)!.content![0] as { text: string }).text).toContain("[Results Archive:");
     // call-3 at index 2: no newer reads -> stays
     expect(((compiled[2] as any)!.content![0] as { text: string }).text).toBe(text);
+  });
+
+  it("should evict archives under hard context pressure even without supersession", async () => {
+    const { runner } = await loadExtension({ tokens: 180_000, contextWindow: 200_000, percent: 90 });
+
+    const filePath = path.join(tempDir, "file.txt");
+    const lines = Array.from({ length: 200 }, (_, i) => `Line ${i + 1} ` + "x".repeat(100));
+    fs.writeFileSync(filePath, lines.join("\n"), "utf8");
+
+    // Read 1: lines 1-200, at index 0 (old)
+    const text1 = lines.join("\n");
+    await runner.emitToolResult(makeReadResult("call-1", { path: filePath, offset: 1, limit: 200 }, text1));
+
+    // Read 2: lines 1-100 (50% coverage of Read 1), at index 1
+    const text2 = lines.slice(0, 100).join("\n");
+    await runner.emitToolResult(makeReadResult("call-2", { path: filePath, offset: 1, limit: 100 }, text2));
+
+    const messages: AgentMessage[] = [
+      makeToolResultMessage("call-1", text1),
+      makeToolResultMessage("call-2", text2),
+    ];
+
+    const compiled = await runner.emitContext(messages);
+
+    // Read 1 is not superseded (coverage 50% < threshold 60%), but under 90%
+    // pressure its eviction score crosses the hard threshold.
+    expect(((compiled[0] as any)!.content![0] as { text: string }).text).toContain("[Results Archive:");
+
+    // Read 2 has no newer reads and is recent; it stays.
+    expect(((compiled[1] as any)!.content![0] as { text: string }).text).toBe(text2);
+  });
+
+  it("should boost newer candidate priority when an older read is already replaced", async () => {
+    const { runner } = await loadExtension({ tokens: 190_000, contextWindow: 200_000, percent: 95 });
+
+    const filePath = path.join(tempDir, "file.txt");
+    const lines = Array.from({ length: 200 }, (_, i) => `Line ${i + 1} ` + "x".repeat(100));
+    fs.writeFileSync(filePath, lines.join("\n"), "utf8");
+
+    // Read old: lines 1-200, at index 0. Will be superseded by Read newer (75% coverage).
+    const oldText = lines.join("\n");
+    await runner.emitToolResult(makeReadResult("call-old", { path: filePath, offset: 1, limit: 200 }, oldText));
+
+    // Read candidate: lines 150-200 (51 lines), at index 1. Read newer overlaps only line 150,
+    // so coverage is ~2% and it is NOT superseded on its own.
+    const candidateText = lines.slice(149, 200).join("\n");
+    await runner.emitToolResult(makeReadResult("call-candidate", { path: filePath, offset: 150, limit: 51 }, candidateText));
+
+    // Read newer: lines 1-150, at index 2. Supersedes Read old.
+    const newerText = lines.slice(0, 150).join("\n");
+    await runner.emitToolResult(makeReadResult("call-newer", { path: filePath, offset: 1, limit: 150 }, newerText));
+
+    const messages: AgentMessage[] = [
+      makeToolResultMessage("call-old", oldText),
+      makeToolResultMessage("call-candidate", candidateText),
+      makeToolResultMessage("call-newer", newerText),
+    ];
+
+    const compiled = await runner.emitContext(messages);
+
+    // Read old is superseded by Read newer.
+    expect(((compiled[0] as any)!.content![0] as { text: string }).text).toContain("[Results Archive:");
+
+    // Read candidate is after the first replacement and gets the co-invalidation
+    // boost, pushing its eviction score over the hard threshold.
+    expect(((compiled[1] as any)!.content![0] as { text: string }).text).toContain("[Results Archive:");
+
+    // Read newer is the freshest read and stays.
+    expect(((compiled[2] as any)!.content![0] as { text: string }).text).toBe(newerText);
   });
 
   it("should not invalidate read content if the disk change is outside the read line range", async () => {

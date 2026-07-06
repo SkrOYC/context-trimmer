@@ -53,6 +53,55 @@ export function totalIntervalLength(intervals: Array<{ start: number; end: numbe
   return intervals.reduce((sum, i) => sum + (i.end - i.start + 1), 0);
 }
 
+export function checkStalenessBatch(
+  archives: ArchivedResult[],
+  cwd: string
+): Map<string, boolean> {
+  const result = new Map<string, boolean>();
+  const byPath = new Map<string, ArchivedResult[]>();
+
+  for (const arc of archives) {
+    const list = byPath.get(arc.parameterKey) ?? [];
+    list.push(arc);
+    byPath.set(arc.parameterKey, list);
+  }
+
+  for (const [paramKey, pathArchives] of byPath) {
+    const filePath = path.isAbsolute(paramKey)
+      ? paramKey
+      : path.resolve(cwd, paramKey);
+
+    if (!fs.existsSync(filePath)) {
+      for (const arc of pathArchives) {
+        result.set(arc.pointerId, true);
+      }
+      continue;
+    }
+
+    const diskContent = fs.readFileSync(filePath, "utf8");
+    const diskLines = diskContent.split("\n");
+
+    for (const arc of pathArchives) {
+      const startLine = arc.startLine;
+      const lineHashes = arc.lineHashes;
+      let stale = false;
+
+      for (let i = 0; i < lineHashes.length; i++) {
+        const lineIndex = startLine - 1 + i;
+        const diskLine = diskLines[lineIndex];
+        if (diskLine === undefined || getHash(diskLine) !== lineHashes[i]) {
+          stale = true;
+          break;
+        }
+      }
+
+      result.set(arc.pointerId, stale);
+    }
+  }
+
+  return result;
+}
+
 export function checkStaleness(arc: ArchivedResult, cwd: string): boolean {
   try {
     const filePath = path.isAbsolute(arc.parameterKey)

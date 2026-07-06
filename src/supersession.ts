@@ -8,6 +8,15 @@ export const MIN_SUPERSESSION_THRESHOLD = 0.25;
 /** Maximum threshold for the oldest reads (beginning of context). */
 export const MAX_SUPERSESSION_THRESHOLD = 0.60;
 
+export interface ArchiveMetrics {
+  pointerId: string;
+  toolCallId: string;
+  index: number;
+  lineCount: number;
+  coverage: number;
+  threshold: number;
+}
+
 /**
  * Compute the replacement threshold for a message based on its position in the
  * compiled context. Recent messages are cheap to remove (invalidate little KV
@@ -71,18 +80,14 @@ export function computeCoverage(
 }
 
 /**
- * Build a set of pointer IDs that should be replaced with pointers because
- * newer reads of the same file have cumulatively covered enough of their range.
- *
- * Only archives whose toolCallId appears in the current compiled messages are
- * considered. This ensures compacted or out-of-branch reads do not participate
- * in supersession decisions for the visible context.
+ * Compute metrics for every archived read that appears in the current compiled
+ * messages. Metrics include message position, cumulative coverage by newer
+ * reads of the same file, and the recency-aware replacement threshold.
  */
-export function findSupersededArchives(
+export function computeArchiveMetrics(
   messages: AgentMessage[],
   archivesByPath: Map<string, ArchivedResult[]>
-): Set<string> {
-  const superseded = new Set<string>();
+): ArchiveMetrics[] {
   const indexByToolCallId = new Map<string, number>();
 
   messages.forEach((msg, idx) => {
@@ -90,6 +95,8 @@ export function findSupersededArchives(
       indexByToolCallId.set(msg.toolCallId, idx);
     }
   });
+
+  const metrics: ArchiveMetrics[] = [];
 
   for (const pathArchives of archivesByPath.values()) {
     // Only consider archives that are present in the current compiled messages.
@@ -105,9 +112,37 @@ export function findSupersededArchives(
       const coverage = computeCoverage(target, laterReads);
       const threshold = computeSupersessionThreshold(targetIndex, messages.length);
 
-      if (coverage >= threshold) {
-        superseded.add(target.pointerId);
-      }
+      metrics.push({
+        pointerId: target.pointerId,
+        toolCallId: target.toolCallId,
+        index: targetIndex,
+        lineCount: target.lineHashes.length,
+        coverage,
+        threshold,
+      });
+    }
+  }
+
+  return metrics;
+}
+
+/**
+ * Build a set of pointer IDs that should be replaced with pointers because
+ * newer reads of the same file have cumulatively covered enough of their range.
+ *
+ * Only archives whose toolCallId appears in the current compiled messages are
+ * considered. This ensures compacted or out-of-branch reads do not participate
+ * in supersession decisions for the visible context.
+ */
+export function findSupersededArchives(
+  messages: AgentMessage[],
+  archivesByPath: Map<string, ArchivedResult[]>
+): Set<string> {
+  const superseded = new Set<string>();
+
+  for (const m of computeArchiveMetrics(messages, archivesByPath)) {
+    if (m.coverage >= m.threshold) {
+      superseded.add(m.pointerId);
     }
   }
 
