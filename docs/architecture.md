@@ -12,7 +12,14 @@ The project is structured as a standalone Bun package with the following layout:
 pi-context-trimmer/
 ├── package.json               # Package configuration & Extension registration
 ├── tsconfig.json              # TypeScript compilation rules
-├── index.ts                   # Core extension logic (Hooks, Policies & Tools)
+├── src/
+│   ├── index.ts               # Extension entry point (wires handlers & tool)
+│   ├── types.ts               # Shared types and policies
+│   ├── state.ts               # Archive state management
+│   ├── utils.ts               # Hashing, footer stripping, staleness check
+│   ├── archive.ts             # tool_result archiving handler
+│   ├── context.ts             # context compilation / staleness replacement
+│   └── recall.ts              # recall_result tool
 ├── test/
 │   └── context-trimmer.test.ts # Automated unit test suite
 └── docs/
@@ -26,17 +33,25 @@ pi-context-trimmer/
 *   Uses the `"pi"` configuration block to register the extension's entry point:
     ```json
     "pi": {
-      "extensions": ["./index.ts"]
+      "extensions": ["./src/index.ts"]
     }
     ```
 
-#### 2. Extension Entry Point (`index.ts`)
+#### 2. Extension Entry Point (`src/index.ts`)
 *   Exposes a default function that receives the `ExtensionAPI`.
-*   Registers event handlers for `"session_start"`, `"session_tree"`, `"tool_result"`, and `"context"`.
-*   Implements the line-level hashing and disk-based file validation (`checkStaleness`).
+*   Initializes shared archive state (`src/state.ts`).
+*   Wires event handlers for `"session_start"`, `"session_tree"`, `"tool_result"`, and `"context"`.
 *   Registers the custom tool `recall_result`.
 
-#### 3. Test Suite (`test/context-trimmer.test.ts`)
+#### 3. Supporting Modules
+*   `src/types.ts` — Shared interfaces and the read-tool policy registry.
+*   `src/state.ts` — In-memory archive state and session rebuild logic.
+*   `src/utils.ts` — SHA-256 hashing, read-tool footer stripping, and disk-based staleness check.
+*   `src/archive.ts` — `tool_result` handler that archives read results.
+*   `src/context.ts` — `context` handler that replaces stale results with pointers.
+*   `src/recall.ts` — `recall_result` tool for on-demand archived content retrieval.
+
+#### 4. Test Suite (`test/context-trimmer.test.ts`)
 *   Uses `bun:test` to spin up a mock `ExtensionRunner` and `SessionManager` in memory.
 *   Exercises the extension hooks synchronously to validate pointer replacements, file-based staleness changes, partial-read tolerances, and the recall tool execution.
 
@@ -53,7 +68,7 @@ graph TD
     end
     
     subgraph Standalone Extension
-        trimmer[index.ts]
+        trimmer[src/index.ts]
         recall[recall_result Tool]
     end
     

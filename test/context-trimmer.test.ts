@@ -64,7 +64,7 @@ describe("Pi Context Trimmer Extension", () => {
   });
 
   it("should load the context trimmer extension and initialize recall_result tool", async () => {
-    const extensionPath = path.resolve("./index.ts");
+    const extensionPath = path.resolve("./src/index.ts");
     const result = await discoverAndLoadExtensions([extensionPath], tempDir, tempDir);
 
     expect(result.errors).toHaveLength(0);
@@ -79,7 +79,7 @@ describe("Pi Context Trimmer Extension", () => {
   });
 
   it("should not replace read results immediately (returns raw result in full)", async () => {
-    const extensionPath = path.resolve("./index.ts");
+    const extensionPath = path.resolve("./src/index.ts");
     const result = await discoverAndLoadExtensions([extensionPath], tempDir, tempDir);
     const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
     runner.bindCore(extensionActions, extensionContextActions);
@@ -115,7 +115,7 @@ describe("Pi Context Trimmer Extension", () => {
   });
 
   it("should preserve raw content in context if the file on disk is unchanged", async () => {
-    const extensionPath = path.resolve("./index.ts");
+    const extensionPath = path.resolve("./src/index.ts");
     const result = await discoverAndLoadExtensions([extensionPath], tempDir, tempDir);
     const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
     runner.bindCore(extensionActions, extensionContextActions);
@@ -158,7 +158,7 @@ describe("Pi Context Trimmer Extension", () => {
   });
 
   it("should replace raw content with stale pointer in context if a read line has changed", async () => {
-    const extensionPath = path.resolve("./index.ts");
+    const extensionPath = path.resolve("./src/index.ts");
     const result = await discoverAndLoadExtensions([extensionPath], tempDir, tempDir);
     const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
     runner.bindCore(extensionActions, extensionContextActions);
@@ -203,7 +203,7 @@ describe("Pi Context Trimmer Extension", () => {
   });
 
   it("should not invalidate read content if the disk change is outside the read line range", async () => {
-    const extensionPath = path.resolve("./index.ts");
+    const extensionPath = path.resolve("./src/index.ts");
     const result = await discoverAndLoadExtensions([extensionPath], tempDir, tempDir);
     const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
     runner.bindCore(extensionActions, extensionContextActions);
@@ -254,7 +254,7 @@ describe("Pi Context Trimmer Extension", () => {
   });
 
   it("should strip read-tool footer before hashing (user limit with more content)", async () => {
-    const extensionPath = path.resolve("./index.ts");
+    const extensionPath = path.resolve("./src/index.ts");
     const result = await discoverAndLoadExtensions([extensionPath], tempDir, tempDir);
     const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
     runner.bindCore(extensionActions, extensionContextActions);
@@ -307,7 +307,7 @@ describe("Pi Context Trimmer Extension", () => {
   });
 
   it("should use details.truncation.content when available", async () => {
-    const extensionPath = path.resolve("./index.ts");
+    const extensionPath = path.resolve("./src/index.ts");
     const result = await discoverAndLoadExtensions([extensionPath], tempDir, tempDir);
     const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
     runner.bindCore(extensionActions, extensionContextActions);
@@ -360,7 +360,7 @@ describe("Pi Context Trimmer Extension", () => {
   });
 
   it("should skip archiving when first line exceeds byte limit", async () => {
-    const extensionPath = path.resolve("./index.ts");
+    const extensionPath = path.resolve("./src/index.ts");
     const result = await discoverAndLoadExtensions([extensionPath], tempDir, tempDir);
     const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
     runner.bindCore(extensionActions, extensionContextActions);
@@ -400,7 +400,7 @@ describe("Pi Context Trimmer Extension", () => {
   });
 
   it("should replace content with pointer if the file is deleted on disk", async () => {
-    const extensionPath = path.resolve("./index.ts");
+    const extensionPath = path.resolve("./src/index.ts");
     const result = await discoverAndLoadExtensions([extensionPath], tempDir, tempDir);
     const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
     runner.bindCore(extensionActions, extensionContextActions);
@@ -442,7 +442,7 @@ describe("Pi Context Trimmer Extension", () => {
   });
 
   it("should recall results correctly using recall_result tool", async () => {
-    const extensionPath = path.resolve("./index.ts");
+    const extensionPath = path.resolve("./src/index.ts");
     const result = await discoverAndLoadExtensions([extensionPath], tempDir, tempDir);
     const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
     runner.bindCore(extensionActions, extensionContextActions);

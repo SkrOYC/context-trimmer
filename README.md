@@ -68,11 +68,11 @@ Install as a pi package or load directly:
 
 ```bash
 # Auto-discovery: place in ~/.pi/agent/extensions/
-cp index.ts ~/.pi/agent/extensions/pi-context-trimmer.ts
+cp src/index.ts ~/.pi/agent/extensions/pi-context-trimmer.ts
 
 # Or load explicitly in ~/.pi/agent/settings.json
 {
-  "extensions": ["/path/to/pi-context-trimmer/index.ts"]
+  "extensions": ["/path/to/pi-context-trimmer/src/index.ts"]
 }
 ```
 
