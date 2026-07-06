@@ -73,12 +73,15 @@ graph TD
 ### A. Tool Execution Flow (Intercepting & Archiving)
 
 When the Pi agent executes a `read` tool:
-1.  The Pi Core executes the tool, returning the full contents of the file on disk.
+1.  The Pi Core executes the tool, returning the contents of the file on disk.
 2.  The extension's `"tool_result"` event handler intercepts the payload.
-3.  If the read content size exceeds 2,000 characters:
-    *   It splits the text into lines and computes SHA-256 hashes for each line.
-    *   It appends a custom `"results-archive"` entry containing the original content, line hashes, and the starting line index to the `.jsonl` log file.
-4.  The handler returns `undefined`, allowing the full file content to go to the model in full at the current turn.
+3.  It determines the actual file content returned by the read tool:
+    *   Prefer the structured `details.truncation.content` metadata when available.
+    *   When `details.truncation` is not set (for example, a user-specified `limit` left more content in the file), strip the read-tool continuation footer from the raw text.
+    *   If `details.truncation.firstLineExceedsLimit` is true, no actual file content was returned, so nothing is archived.
+4.  It splits the cleaned content on `"\n"` (matching pi's read tool) and computes SHA-256 hashes for each line.
+5.  It appends a custom `"results-archive"` entry containing the original tool result content, line hashes, and the starting line index to the `.jsonl` log file.
+6.  The handler returns `undefined`, allowing the full file content to go to the model in full at the current turn.
 
 ```mermaid
 sequenceDiagram
@@ -91,10 +94,9 @@ sequenceDiagram
     LLM->>PiCore: Call read("/src/main.ts")
     PiCore->>PiCore: Executes read tool
     PiCore->>Ext: Emit "tool_result"
-    alt Content size > 2000 chars
-        Ext->>Ext: Split content & compute line hashes
-        Ext->>Session: Append CustomEntry ("results-archive")
-    end
+    Ext->>Ext: Determine actual returned content
+    Ext->>Ext: Split content & compute line hashes
+    Ext->>Session: Append CustomEntry ("results-archive")
     Ext-->>PiCore: Return unmodified result (undefined)
     PiCore-->>LLM: Full file contents
 ```
@@ -104,7 +106,7 @@ sequenceDiagram
 Before sending the conversation history to the LLM for the next turn:
 1.  Pi Core triggers context compilation, emitting the `"context"` event with the current `AgentMessage[]` array.
 2.  The extension's handler checks all historical `"read"` tool results.
-3.  For each result, it reads the current state of the file on disk.
+3.  For each result, it reads the current state of the file on disk and splits it on `"\n"`, matching pi's read tool.
 4.  It verifies if the hashes of the specific lines read have changed:
     *   **If unchanged (Active)**: The raw text is left untouched.
     *   **If changed or file deleted (Stale)**: The raw text is replaced in-memory with `[Results Archive: pointer_id (Invalidated - Stale)]`.
@@ -137,7 +139,7 @@ If the model sees a stale pointer `[Results Archive: ptr_xxx (Invalidated - Stal
 1.  The LLM executes the `recall_result(pointer_id: "ptr_xxx")` tool.
 2.  The tool searches the active branch logs in the Session Manager to find the corresponding `"results-archive"` custom entry.
 3.  The tool checks the current file on disk:
-    *   **If Stale**: Returns the archived content accompanied by a `Warning: Content is stale` header.
+    *   **If Stale**: Returns the archived content wrapped in `<recalled-stale-content>` XML tags and preceded by a warning that the pointer was invalidated.
     *   **If Active** (e.g. reverted manually by the user): Returns the raw content string.
 
 ```mermaid

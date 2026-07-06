@@ -94,7 +94,7 @@ describe("Pi Context Trimmer Extension", () => {
       type: "tool_result",
       toolName: "read",
       toolCallId: "call-1",
-      input: { AbsolutePath: filePath },
+      input: { path: filePath },
       content: [{ type: "text", text: fileContent }],
       isError: false,
       details: undefined,
@@ -131,7 +131,7 @@ describe("Pi Context Trimmer Extension", () => {
       type: "tool_result",
       toolName: "read",
       toolCallId: "call-1",
-      input: { AbsolutePath: filePath },
+      input: { path: filePath },
       content: [{ type: "text", text: fileContent }],
       isError: false,
       details: undefined,
@@ -173,7 +173,7 @@ describe("Pi Context Trimmer Extension", () => {
       type: "tool_result",
       toolName: "read",
       toolCallId: "call-1",
-      input: { AbsolutePath: filePath },
+      input: { path: filePath },
       content: [{ type: "text", text: fileContent }],
       isError: false,
       details: undefined,
@@ -223,7 +223,7 @@ describe("Pi Context Trimmer Extension", () => {
       type: "tool_result",
       toolName: "read",
       toolCallId: "call-1",
-      input: { AbsolutePath: filePath, offset: 5, limit: 3 },
+      input: { path: filePath, offset: 5, limit: 3 },
       content: [{ type: "text", text: readText }],
       isError: false,
       details: undefined,
@@ -253,6 +253,152 @@ describe("Pi Context Trimmer Extension", () => {
     expect(text).toBe(readText);
   });
 
+  it("should strip read-tool footer before hashing (user limit with more content)", async () => {
+    const extensionPath = path.resolve("./index.ts");
+    const result = await discoverAndLoadExtensions([extensionPath], tempDir, tempDir);
+    const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+    runner.bindCore(extensionActions, extensionContextActions);
+
+    await runner.emit({ type: "session_start", reason: "startup" });
+
+    const filePath = path.join(tempDir, "file.txt");
+    const lines = Array.from({ length: 10 }, (_, i) => `Line ${i + 1} ` + "x".repeat(800));
+    fs.writeFileSync(filePath, lines.join("\n"), "utf8");
+
+    // Partial read: lines 5 to 7, with read-tool footer appended because more content remains
+    const readLines = lines.slice(4, 7);
+    const readText = readLines.join("\n");
+    const rawTextWithFooter = `${readText}\n\n[7 more lines in file. Use offset=8 to continue.]`;
+
+    await runner.emitToolResult({
+      type: "tool_result",
+      toolName: "read",
+      toolCallId: "call-1",
+      input: { path: filePath, offset: 5, limit: 3 },
+      content: [{ type: "text", text: rawTextWithFooter }],
+      isError: false,
+      details: undefined,
+    });
+
+    const branch = sessionManager.getBranch();
+    const archiveEntry = branch.find(e => e.type === "custom" && e.customType === "results-archive");
+    expect(archiveEntry).toBeDefined();
+
+    const arcData = (archiveEntry as any).data;
+    expect(arcData.startLine).toBe(5);
+    // Should hash only the 3 real content lines, not the footer
+    expect(arcData.lineHashes).toHaveLength(3);
+
+    // Verify unchanged content is not marked stale
+    const messages: AgentMessage[] = [
+      {
+        role: "toolResult",
+        toolCallId: "call-1",
+        toolName: "read",
+        isError: false,
+        timestamp: Date.now(),
+        content: [{ type: "text", text: rawTextWithFooter }]
+      }
+    ];
+    const compiled = await runner.emitContext(messages);
+    const text = ((compiled[0] as any)!.content![0] as { text: string }).text;
+    expect(text).toBe(rawTextWithFooter);
+    expect(text).not.toContain("Results Archive");
+  });
+
+  it("should use details.truncation.content when available", async () => {
+    const extensionPath = path.resolve("./index.ts");
+    const result = await discoverAndLoadExtensions([extensionPath], tempDir, tempDir);
+    const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+    runner.bindCore(extensionActions, extensionContextActions);
+
+    await runner.emit({ type: "session_start", reason: "startup" });
+
+    const filePath = path.join(tempDir, "file.txt");
+    const fileContent = "Line 1\n" + "a".repeat(3000) + "\nLine 3";
+    fs.writeFileSync(filePath, fileContent, "utf8");
+
+    // Simulate read tool returning truncation metadata where only the first two lines were kept
+    const truncatedContent = "Line 1\n" + "a".repeat(2100);
+    const rawText = fileContent;
+
+    await runner.emitToolResult({
+      type: "tool_result",
+      toolName: "read",
+      toolCallId: "call-1",
+      input: { path: filePath },
+      content: [{ type: "text", text: rawText }],
+      isError: false,
+      details: {
+        truncation: {
+          content: truncatedContent,
+          truncated: true,
+          truncatedBy: "bytes",
+          totalLines: 3,
+          totalBytes: Buffer.byteLength(fileContent, "utf-8"),
+          outputLines: 1,
+          outputBytes: Buffer.byteLength(truncatedContent, "utf-8"),
+          lastLinePartial: false,
+          firstLineExceedsLimit: false,
+          maxLines: 2000,
+          maxBytes: 50 * 1024,
+        }
+      },
+    });
+
+    const branch = sessionManager.getBranch();
+    const archiveEntry = branch.find(e => e.type === "custom" && e.customType === "results-archive");
+    expect(archiveEntry).toBeDefined();
+
+    const arcData = (archiveEntry as any).data;
+    // Should hash only the truncated content lines, not the full raw text
+    expect(arcData.lineHashes).toHaveLength(2);
+    expect(arcData.startLine).toBe(1);
+
+    // Verify the original raw content is preserved for recall
+    expect(arcData.originalContent).toBe(JSON.stringify([{ type: "text", text: rawText }]));
+  });
+
+  it("should skip archiving when first line exceeds byte limit", async () => {
+    const extensionPath = path.resolve("./index.ts");
+    const result = await discoverAndLoadExtensions([extensionPath], tempDir, tempDir);
+    const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+    runner.bindCore(extensionActions, extensionContextActions);
+
+    await runner.emit({ type: "session_start", reason: "startup" });
+
+    const filePath = path.join(tempDir, "file.txt");
+    fs.writeFileSync(filePath, "placeholder", "utf8");
+
+    await runner.emitToolResult({
+      type: "tool_result",
+      toolName: "read",
+      toolCallId: "call-1",
+      input: { path: filePath },
+      content: [{ type: "text", text: "[Line 1 is 60KB, exceeds 50KB limit. Use bash: ...]" }],
+      isError: false,
+      details: {
+        truncation: {
+          content: "",
+          truncated: true,
+          truncatedBy: "bytes",
+          totalLines: 1,
+          totalBytes: 60000,
+          outputLines: 0,
+          outputBytes: 0,
+          lastLinePartial: false,
+          firstLineExceedsLimit: true,
+          maxLines: 2000,
+          maxBytes: 50 * 1024,
+        }
+      },
+    });
+
+    const branch = sessionManager.getBranch();
+    const archiveEntry = branch.find(e => e.type === "custom" && e.customType === "results-archive");
+    expect(archiveEntry).toBeUndefined();
+  });
+
   it("should replace content with pointer if the file is deleted on disk", async () => {
     const extensionPath = path.resolve("./index.ts");
     const result = await discoverAndLoadExtensions([extensionPath], tempDir, tempDir);
@@ -269,7 +415,7 @@ describe("Pi Context Trimmer Extension", () => {
       type: "tool_result",
       toolName: "read",
       toolCallId: "call-1",
-      input: { AbsolutePath: filePath },
+      input: { path: filePath },
       content: [{ type: "text", text: fileContent }],
       isError: false,
       details: undefined,
@@ -311,7 +457,7 @@ describe("Pi Context Trimmer Extension", () => {
       type: "tool_result",
       toolName: "read",
       toolCallId: "call-1",
-      input: { AbsolutePath: filePath },
+      input: { path: filePath },
       content: [{ type: "text", text: fileContent }],
       isError: false,
       details: undefined,
@@ -352,7 +498,10 @@ describe("Pi Context Trimmer Extension", () => {
 
     expect((staleResult as any).isError).toBeFalsy();
     expect(staleResult.details?.status).toBe("invalidated");
-    expect((staleResult.content![0] as { text: string }).text).toContain("Warning: Pointer");
-    expect(staleResult.details?.originalContent[0].text).toBe(fileContent);
+    const staleText = (staleResult.content![0] as { text: string }).text;
+    expect(staleText).toContain("<recalled-stale-content>");
+    expect(staleText).toContain("Warning: Pointer");
+    expect(staleText).toContain(fileContent);
+    expect(staleText).toContain("</recalled-stale-content>");
   });
 });

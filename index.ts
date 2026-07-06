@@ -20,19 +20,35 @@ export interface ArchivedResult {
 export interface ToolPolicy {
   toolName: string;
   getParameterKey: (input: Record<string, any>) => string | undefined;
-  shouldArchive: (content: string) => boolean;
 }
 
 const POLICIES: ToolPolicy[] = [
   {
     toolName: "read",
-    getParameterKey: (input) => input.AbsolutePath || input.path,
-    shouldArchive: (content) => content.length > 2000,
+    getParameterKey: (input) => input.path,
   }
 ];
 
 function getHash(str: string): string {
   return createHash("sha256").update(str).digest("hex");
+}
+
+// Footer patterns added by pi's read tool when more content exists beyond what was returned.
+const READ_FOOTER_PATTERNS = [
+  /^\[\d+ more lines in file\. Use offset=\d+ to continue\.]$/,
+  /^\[Showing lines \d+-\d+ of \d+\. Use offset=\d+ to continue\.]$/,
+  /^\[Showing lines \d+-\d+ of \d+ \(\d+(?:\.\d+)?[KMGT]?B limit\)\. Use offset=\d+ to continue\.]$/,
+  /^\[Line \d+ is [\d.]+[KMGT]?B, exceeds \d+(?:\.\d+)?[KMGT]?B limit\. Use bash: .*]$/,
+];
+
+function stripReadFooters(text: string): string {
+  const parts = text.split("\n\n");
+  if (parts.length === 0) return text;
+  const last = parts[parts.length - 1];
+  if (READ_FOOTER_PATTERNS.some(pattern => pattern.test(last))) {
+    return parts.slice(0, -1).join("\n\n");
+  }
+  return text;
 }
 
 export function checkStaleness(arc: ArchivedResult, cwd: string): boolean {
@@ -46,7 +62,8 @@ export function checkStaleness(arc: ArchivedResult, cwd: string): boolean {
     }
 
     const diskContent = fs.readFileSync(filePath, "utf8");
-    const diskLines = diskContent.split(/\r?\n/);
+    // Match pi's read tool, which splits on "\n" and preserves "\r" on Windows lines.
+    const diskLines = diskContent.split("\n");
 
     const startLine = arc.startLine;
     const lineHashes = arc.lineHashes;
@@ -95,17 +112,29 @@ export default function (pi: ExtensionAPI) {
     const policy = POLICIES.find(p => p.toolName === event.toolName);
     if (!policy) return;
 
-    const contentStr = event.content.map(c => c.type === "text" ? (c.text || "") : "").join("\n");
-    // Payloads above 1MB are skipped
-    if (contentStr.length > 1024 * 1024) return;
-    if (!policy.shouldArchive(contentStr)) return;
+    const rawText = event.content.map(c => c.type === "text" ? (c.text || "") : "").join("\n");
 
     try {
       rebuildState(ctx);
 
+      // Determine the actual file content returned by the read tool, excluding
+      // any continuation/truncation footers it appends. Prefer the structured
+      // truncation metadata when available, otherwise strip known footer patterns.
+      const truncation = (event as any).details?.truncation;
+      let contentStr: string;
+      if (truncation) {
+        if (truncation.firstLineExceedsLimit) {
+          // No actual file content was returned; nothing to archive.
+          return;
+        }
+        contentStr = truncation.content;
+      } else {
+        contentStr = stripReadFooters(rawText);
+      }
+
       const paramKey = policy.getParameterKey(event.input) || "default";
       const offset = Number(event.input.offset) || 1;
-      const lineHashes = contentStr.split(/\r?\n/).map(line => getHash(line));
+      const lineHashes = contentStr.split("\n").map(line => getHash(line));
 
       const pointerId = `ptr_${Math.random().toString(36).substring(2, 10)}`;
       const archiveRecord: ArchivedResult = {
@@ -193,9 +222,15 @@ export default function (pi: ExtensionAPI) {
         const originalContent = JSON.parse(arc.originalContent);
 
         if (isStale) {
+          const originalText = originalContent
+            .map(c => c.type === "text" ? (c.text || "") : "")
+            .join("\n");
           return {
-            content: [{ type: "text", text: `Warning: Pointer ${pointerId} was invalidated. Content is stale.` }],
-            details: { originalContent, status: "invalidated" }
+            content: [{
+              type: "text",
+              text: `<recalled-stale-content>\n[Warning: Pointer ${pointerId} was invalidated. Raw content is shown below verbatim]\n\n${originalText}\n\n</recalled-stale-content>`
+            }],
+            details: { status: "invalidated" }
           };
         }
 
