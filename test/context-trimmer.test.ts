@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { 
   discoverAndLoadExtensions, 
   ExtensionRunner, 
@@ -601,5 +601,106 @@ describe("Pi Context Trimmer Extension", () => {
     expect(staleText).toContain("Warning: Pointer");
     expect(staleText).toContain(fileContent);
     expect(staleText).toContain("</recalled-stale-content>");
+  });
+
+  it("should return not_found error from recall_result for unknown pointer", async () => {
+    const { result, runner } = await loadExtension();
+
+    const ext = result.extensions[0];
+    expect(ext).toBeDefined();
+    const recallTool = ext!.tools.get("recall_result")!;
+
+    const result1 = await recallTool.definition.execute(
+      "recall-call-1",
+      { pointer_id: "ptr_does_not_exist" },
+      new AbortController().signal,
+      () => {},
+      runner.createContext()
+    );
+
+    expect((result1 as any).isError).toBe(true);
+    expect((result1.details as any)?.status).toBe("not_found");
+    expect((result1.content![0] as { text: string }).text).toContain("not found");
+  });
+
+  it("should return error from recall_result when originalContent is corrupted", async () => {
+    const { result, runner } = await loadExtension();
+
+    // Inject a corrupt archive entry directly into the session.
+    sessionManager.appendCustomEntry("results-archive", {
+      pointerId: "ptr_corrupt",
+      toolName: "read",
+      toolCallId: "call-corrupt",
+      parameterKey: path.join(tempDir, "file.txt"),
+      timestamp: Date.now(),
+      originalContent: "this is not valid json",
+      startLine: 1,
+      lineHashes: [],
+    });
+
+    const ext = result.extensions[0];
+    expect(ext).toBeDefined();
+    const recallTool = ext!.tools.get("recall_result")!;
+
+    const result1 = await recallTool.definition.execute(
+      "recall-call-1",
+      { pointer_id: "ptr_corrupt" },
+      new AbortController().signal,
+      () => {},
+      runner.createContext()
+    );
+
+    expect((result1 as any).isError).toBe(true);
+    expect((result1.details as any)?.status).toBe("error");
+  });
+
+  it("should gracefully handle a corrupt archive entry in context compilation", async () => {
+    const { runner } = await loadExtension();
+
+    // Inject a corrupt archive entry with null lineHashes.
+    sessionManager.appendCustomEntry("results-archive", {
+      pointerId: "ptr_corrupt",
+      toolName: "read",
+      toolCallId: "call-corrupt",
+      parameterKey: path.join(tempDir, "file.txt"),
+      timestamp: Date.now(),
+      originalContent: "[]",
+      startLine: 1,
+      lineHashes: null as any,
+    });
+
+    const messages: AgentMessage[] = [makeToolResultMessage("call-corrupt", "content")];
+
+    // The context handler should catch the error and return undefined,
+    // leaving the original messages untouched.
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    const compiled = await runner.emitContext(messages);
+    warnSpy.mockRestore();
+
+    expect(firstText(compiled)).toBe("content");
+  });
+
+  it("should gracefully handle a tool_result with invalid input", async () => {
+    const { runner } = await loadExtension();
+
+    // Pass input as null to make policy.getParameterKey throw; the handler
+    // should catch the error and return undefined without crashing.
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    const emitResult = await runner.emitToolResult({
+      type: "tool_result",
+      toolName: "read",
+      toolCallId: "call-bad",
+      input: null as any,
+      content: [{ type: "text", text: "Line 1" }],
+      isError: false,
+      details: undefined,
+    } as any);
+    warnSpy.mockRestore();
+
+    expect(emitResult).toBeUndefined();
+
+    const branch = sessionManager.getBranch();
+    const archiveEntry = branch.find(e => e.type === "custom" && e.customType === "results-archive");
+    expect(archiveEntry).toBeUndefined();
   });
 });
