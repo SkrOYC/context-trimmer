@@ -19,10 +19,38 @@ export function stripReadFooters(text: string): string {
   const parts = text.split("\n\n");
   if (parts.length === 0) return text;
   const last = parts[parts.length - 1];
-  if (READ_FOOTER_PATTERNS.some(pattern => pattern.test(last))) {
+  if (last && READ_FOOTER_PATTERNS.some(pattern => pattern.test(last))) {
     return parts.slice(0, -1).join("\n\n");
   }
   return text;
+}
+
+export function mergeIntervals(intervals: Array<{ start: number; end: number }>): Array<{ start: number; end: number }> {
+  if (intervals.length === 0) return [];
+
+  const sorted = intervals
+    .filter(i => i.start <= i.end)
+    .slice()
+    .sort((a, b) => a.start - b.start || a.end - b.end);
+
+  const merged: Array<{ start: number; end: number }> = [];
+  let current = sorted[0]!;
+
+  for (let i = 1; i < sorted.length; i++) {
+    const next = sorted[i]!;
+    if (next.start <= current.end + 1) {
+      current.end = Math.max(current.end, next.end);
+    } else {
+      merged.push(current);
+      current = next;
+    }
+  }
+  merged.push(current);
+  return merged;
+}
+
+export function totalIntervalLength(intervals: Array<{ start: number; end: number }>): number {
+  return intervals.reduce((sum, i) => sum + (i.end - i.start + 1), 0);
 }
 
 export function checkStaleness(arc: ArchivedResult, cwd: string): boolean {

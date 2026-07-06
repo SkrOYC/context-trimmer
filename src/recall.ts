@@ -32,7 +32,7 @@ export function createRecallTool(pi: ExtensionAPI, state: ArchiveState) {
         const originalContent = JSON.parse(arc.originalContent);
 
         if (isStale) {
-          const originalText = originalContent
+          const originalText = (originalContent as Array<{ type: string; text?: string }>)
             .map(c => c.type === "text" ? (c.text || "") : "")
             .join("\n");
           return {

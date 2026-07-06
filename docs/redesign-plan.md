@@ -2,7 +2,7 @@
 
 > Tracking document for the upcoming refactor of the context-trimmer extension.
 > Created: 2026-07-05
-> Status: Design phase complete; implementation pending.
+> Status: Implemented.
 
 ---
 
@@ -290,10 +290,10 @@ The following are explicitly deferred but noted for later:
 
 ## 8. Acceptance Criteria
 
-- [ ] A single line change does not replace a large read result.
-- [ ] A newer read covering >=60% of an old early-context read replaces it.
-- [ ] A newer read covering >=25% of a recent read replaces it.
-- [ ] Multiple partial newer reads can cumulatively supersede an old read.
-- [ ] All replacements happen in one `context` pass.
-- [ ] `recall_result` still works for both active and stale content.
-- [ ] Tests pass and cover the new behavior.
+- [x] A single line change does not replace a large read result.
+- [x] A newer read covering >=60% of an old early-context read replaces it.
+- [x] A newer read covering >=25% of a recent read replaces it.
+- [x] Multiple partial newer reads can cumulatively supersede an old read.
+- [x] All replacements happen in one `context` pass.
+- [x] `recall_result` still works for both active and stale content.
+- [x] Tests pass and cover the new behavior.

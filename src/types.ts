@@ -16,6 +16,16 @@ export interface ToolPolicy {
   getParameterKey: (input: Record<string, any>) => string | undefined;
 }
 
+export interface LineRange {
+  start: number; // 1-indexed, inclusive
+  end: number;   // 1-indexed, inclusive
+}
+
+export interface EvictionCandidate {
+  archive: ArchivedResult;
+  score: number;
+}
+
 export const POLICIES: ToolPolicy[] = [
   {
     toolName: "read",

@@ -4,7 +4,7 @@ import { ARCHIVE_TYPE, POLICIES, type ArchivedResult } from "./types";
 import { getHash, stripReadFooters } from "./utils";
 
 export function createArchiveHandler(pi: ExtensionAPI, state: ArchiveState) {
-  const { activeArchives, rebuildState } = state;
+  const { activeArchives, rebuildState, registerArchive } = state;
 
   pi.on("tool_result", async (event, ctx: ExtensionContext) => {
     const policy = POLICIES.find(p => p.toolName === event.toolName);
@@ -47,7 +47,7 @@ export function createArchiveHandler(pi: ExtensionAPI, state: ArchiveState) {
       };
 
       pi.appendEntry<ArchivedResult>(ARCHIVE_TYPE, archiveRecord);
-      activeArchives.set(pointerId, archiveRecord);
+      registerArchive(archiveRecord);
 
       // Return undefined so the tool result goes to the model in full initially
       return undefined;
