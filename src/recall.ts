@@ -1,5 +1,8 @@
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ArchiveState } from "./state";
 import { checkStaleness } from "./utils";
 
@@ -7,13 +10,9 @@ export function createRecallTool(pi: ExtensionAPI, state: ArchiveState) {
   const { activeArchives, rebuildState } = state;
 
   pi.registerTool({
-    name: "recall_result",
-    label: "Recall Result",
-    description: "Retrieve complete or older tool result payloads from the results archive.",
-    parameters: Type.Object({
-      pointer_id: Type.String({ description: "The pointer ID, e.g. ptr_abc123" })
-    }),
-    async execute(toolCallId, params, signal, onUpdate, ctx: ExtensionContext) {
+    description:
+      "Retrieve complete or older tool result payloads from the results archive.",
+    execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionContext) {
       try {
         rebuildState(ctx);
 
@@ -21,40 +20,61 @@ export function createRecallTool(pi: ExtensionAPI, state: ArchiveState) {
         const arc = activeArchives.get(pointerId);
 
         if (!arc) {
-          return {
-            content: [{ type: "text", text: `Error: Pointer ${pointerId} not found in this branch.` }],
+          return Promise.resolve({
+            content: [
+              {
+                text: `Error: Pointer ${pointerId} not found in this branch.`,
+                type: "text",
+              },
+            ],
+            details: { status: "not_found" },
             isError: true,
-            details: { status: "not_found" }
-          } as any;
+          });
         }
 
         const isStale = checkStaleness(arc, ctx.cwd);
         const originalContent = JSON.parse(arc.originalContent);
 
         if (isStale) {
-          const originalText = (originalContent as Array<{ type: string; text?: string }>)
-            .map(c => c.type === "text" ? (c.text || "") : "")
+          const originalText = (
+            originalContent as Array<{ type: string; text?: string }>
+          )
+            .map((c) => (c.type === "text" ? c.text || "" : ""))
             .join("\n");
-          return {
-            content: [{
-              type: "text",
-              text: `<recalled-stale-content>\n[Warning: Pointer ${pointerId} was invalidated. Raw content is shown below verbatim]\n\n${originalText}\n\n</recalled-stale-content>`
-            }],
-            details: { status: "invalidated" }
-          };
+          return Promise.resolve({
+            content: [
+              {
+                text: `<recalled-stale-content>\n[Warning: Pointer ${pointerId} was invalidated. Raw content is shown below verbatim]\n\n${originalText}\n\n</recalled-stale-content>`,
+                type: "text",
+              },
+            ],
+            details: { status: "invalidated" },
+          });
         }
 
-        return {
+        return Promise.resolve({
           content: originalContent,
-          details: { status: "active" }
-        };
+          details: { status: "active" },
+        });
       } catch (err) {
-        return {
-          content: [{ type: "text", text: `Error recalling result: ${err instanceof Error ? err.message : String(err)}` }],
+        return Promise.resolve({
+          content: [
+            {
+              text: `Error recalling result: ${err instanceof Error ? err.message : String(err)}`,
+              type: "text",
+            },
+          ],
+          details: { status: "error" },
           isError: true,
-          details: { status: "error" }
-        } as any;
+        });
       }
-    }
+    },
+    label: "Recall Result",
+    name: "recall_result",
+    parameters: Type.Object({
+      pointer_id: Type.String({
+        description: "The pointer ID, e.g. ptr_abc123",
+      }),
+    }),
   });
 }

@@ -1,23 +1,28 @@
 {
+  "devDependencies": {
+    "@biomejs/biome": "2.5.2",
+    "@earendil-works/pi-coding-agent": "0.80.3",
+    "@types/bun": "latest",
+    "typebox": "^1.3.4",
+    "ultracite": "7.9.0"
+  },
   "name": "pi-context-trimmer",
-  "module": "index.ts",
-  "type": "module",
-  "private": true,
+  "peerDependencies": {
+    "typescript": "^5"
+  },
   "scripts": {
     "test": "bun test",
-    "test:coverage": "bun test --coverage"
+    "test:coverage": "bun test --coverage",
+    "check": "bunx --bun @biomejs/biome check",
+    "fix": "bunx --bun @biomejs/biome check --write",
+    "format": "bunx --bun @biomejs/biome format --write"
   },
+  "type": "module",
+  "module": "index.ts",
+  "private": true,
   "pi": {
     "extensions": [
       "./src/index.ts"
     ]
-  },
-  "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.80.3",
-    "@types/bun": "latest",
-    "typebox": "^1.3.4"
-  },
-  "peerDependencies": {
-    "typescript": "^5"
   }
 }

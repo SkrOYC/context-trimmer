@@ -21,7 +21,7 @@ export function createArchiveState(): ArchiveState {
     for (const entry of branch) {
       if (entry.type === "custom" && entry.customType === ARCHIVE_TYPE) {
         const arc = entry.data as ArchivedResult;
-        if (arc && arc.pointerId) {
+        if (arc.pointerId) {
           registerArchive(arc);
         }
       }

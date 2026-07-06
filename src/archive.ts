@@ -1,16 +1,28 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
+import { isReadToolResult } from "@earendil-works/pi-coding-agent";
 import type { ArchiveState } from "./state";
-import { ARCHIVE_TYPE, POLICIES, type ArchivedResult } from "./types";
+import { ARCHIVE_TYPE, type ArchivedResult, POLICIES } from "./types";
 import { getHash, stripReadFooters } from "./utils";
 
 export function createArchiveHandler(pi: ExtensionAPI, state: ArchiveState) {
-  const { activeArchives, rebuildState, registerArchive } = state;
+  const { rebuildState, registerArchive } = state;
 
-  pi.on("tool_result", async (event, ctx: ExtensionContext) => {
-    const policy = POLICIES.find(p => p.toolName === event.toolName);
-    if (!policy) return;
+  pi.on("tool_result", (event, ctx: ExtensionContext) => {
+    const policy = POLICIES.find((p) => p.toolName === event.toolName);
+    if (!policy) {
+      return;
+    }
 
-    const rawText = event.content.map(c => c.type === "text" ? (c.text || "") : "").join("\n");
+    if (!isReadToolResult(event)) {
+      return;
+    }
+
+    const rawText = event.content
+      .map((c) => (c.type === "text" ? c.text || "" : ""))
+      .join("\n");
 
     try {
       rebuildState(ctx);
@@ -18,7 +30,7 @@ export function createArchiveHandler(pi: ExtensionAPI, state: ArchiveState) {
       // Determine the actual file content returned by the read tool, excluding
       // any continuation/truncation footers it appends. Prefer the structured
       // truncation metadata when available, otherwise strip known footer patterns.
-      const truncation = (event as any).details?.truncation;
+      const truncation = event.details?.truncation;
       let contentStr: string;
       if (truncation) {
         if (truncation.firstLineExceedsLimit) {
@@ -32,28 +44,24 @@ export function createArchiveHandler(pi: ExtensionAPI, state: ArchiveState) {
 
       const paramKey = policy.getParameterKey(event.input) || "default";
       const offset = Number(event.input.offset) || 1;
-      const lineHashes = contentStr.split("\n").map(line => getHash(line));
+      const lineHashes = contentStr.split("\n").map((line) => getHash(line));
 
-      const pointerId = `ptr_${Math.random().toString(36).substring(2, 10)}`;
+      const pointerId = `ptr_${Math.random().toString(36).slice(2, 10)}`;
       const archiveRecord: ArchivedResult = {
-        pointerId,
-        toolName: event.toolName,
-        toolCallId: event.toolCallId,
-        parameterKey: paramKey,
-        timestamp: Date.now(),
+        lineHashes,
         originalContent: JSON.stringify(event.content),
+        parameterKey: paramKey,
+        pointerId,
         startLine: offset,
-        lineHashes
+        timestamp: Date.now(),
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
       };
 
       pi.appendEntry<ArchivedResult>(ARCHIVE_TYPE, archiveRecord);
       registerArchive(archiveRecord);
-
-      // Return undefined so the tool result goes to the model in full initially
-      return undefined;
     } catch (err) {
       console.warn("[Context Trimmer] Failed to archive read result:", err);
-      return;
     }
   });
 }

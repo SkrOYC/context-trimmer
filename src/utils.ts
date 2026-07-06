@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import * as fs from "node:fs";
-import * as path from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { isAbsolute, resolve } from "node:path";
 import type { ArchivedResult } from "./types";
 
 export function getHash(str: string): string {
@@ -17,27 +17,36 @@ const READ_FOOTER_PATTERNS = [
 
 export function stripReadFooters(text: string): string {
   const parts = text.split("\n\n");
-  if (parts.length === 0) return text;
-  const last = parts[parts.length - 1];
-  if (last && READ_FOOTER_PATTERNS.some(pattern => pattern.test(last))) {
+  if (parts.length === 0) {
+    return text;
+  }
+  const last = parts.at(-1);
+  if (last && READ_FOOTER_PATTERNS.some((pattern) => pattern.test(last))) {
     return parts.slice(0, -1).join("\n\n");
   }
   return text;
 }
 
-export function mergeIntervals(intervals: Array<{ start: number; end: number }>): Array<{ start: number; end: number }> {
-  if (intervals.length === 0) return [];
-
+export function mergeIntervals(
+  intervals: Array<{ start: number; end: number }>
+): Array<{ start: number; end: number }> {
   const sorted = intervals
-    .filter(i => i.start <= i.end)
+    .filter((i) => i.start <= i.end)
     .slice()
     .sort((a, b) => a.start - b.start || a.end - b.end);
 
   const merged: Array<{ start: number; end: number }> = [];
-  let current = sorted[0]!;
+  const [first] = sorted;
+  if (!first) {
+    return merged;
+  }
+  let current = first;
 
-  for (let i = 1; i < sorted.length; i++) {
-    const next = sorted[i]!;
+  for (let i = 1; i < sorted.length; i += 1) {
+    const next = sorted[i];
+    if (!next) {
+      continue;
+    }
     if (next.start <= current.end + 1) {
       current.end = Math.max(current.end, next.end);
     } else {
@@ -49,7 +58,9 @@ export function mergeIntervals(intervals: Array<{ start: number; end: number }>)
   return merged;
 }
 
-export function totalIntervalLength(intervals: Array<{ start: number; end: number }>): number {
+export function totalIntervalLength(
+  intervals: Array<{ start: number; end: number }>
+): number {
   return intervals.reduce((sum, i) => sum + (i.end - i.start + 1), 0);
 }
 
@@ -67,26 +78,23 @@ export function checkStalenessBatch(
   }
 
   for (const [paramKey, pathArchives] of byPath) {
-    const filePath = path.isAbsolute(paramKey)
-      ? paramKey
-      : path.resolve(cwd, paramKey);
+    const filePath = isAbsolute(paramKey) ? paramKey : resolve(cwd, paramKey);
 
-    if (!fs.existsSync(filePath)) {
+    if (!existsSync(filePath)) {
       for (const arc of pathArchives) {
         result.set(arc.pointerId, true);
       }
       continue;
     }
 
-    const diskContent = fs.readFileSync(filePath, "utf8");
+    const diskContent = readFileSync(filePath, "utf8");
     const diskLines = diskContent.split("\n");
 
     for (const arc of pathArchives) {
-      const startLine = arc.startLine;
-      const lineHashes = arc.lineHashes;
+      const { lineHashes, startLine } = arc;
       let stale = false;
 
-      for (let i = 0; i < lineHashes.length; i++) {
+      for (let i = 0; i < lineHashes.length; i += 1) {
         const lineIndex = startLine - 1 + i;
         const diskLine = diskLines[lineIndex];
         if (diskLine === undefined || getHash(diskLine) !== lineHashes[i]) {
@@ -104,22 +112,21 @@ export function checkStalenessBatch(
 
 export function checkStaleness(arc: ArchivedResult, cwd: string): boolean {
   try {
-    const filePath = path.isAbsolute(arc.parameterKey)
+    const filePath = isAbsolute(arc.parameterKey)
       ? arc.parameterKey
-      : path.resolve(cwd, arc.parameterKey);
+      : resolve(cwd, arc.parameterKey);
 
-    if (!fs.existsSync(filePath)) {
+    if (!existsSync(filePath)) {
       return true;
     }
 
-    const diskContent = fs.readFileSync(filePath, "utf8");
+    const diskContent = readFileSync(filePath, "utf8");
     // Match pi's read tool, which splits on "\n" and preserves "\r" on Windows lines.
     const diskLines = diskContent.split("\n");
 
-    const startLine = arc.startLine;
-    const lineHashes = arc.lineHashes;
+    const { lineHashes, startLine } = arc;
 
-    for (let i = 0; i < lineHashes.length; i++) {
+    for (let i = 0; i < lineHashes.length; i += 1) {
       const lineIndex = startLine - 1 + i;
       const diskLine = diskLines[lineIndex];
       if (diskLine === undefined) {

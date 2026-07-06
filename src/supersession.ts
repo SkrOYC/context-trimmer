@@ -6,15 +6,15 @@ import { mergeIntervals, totalIntervalLength } from "./utils";
 export const MIN_SUPERSESSION_THRESHOLD = 0.25;
 
 /** Maximum threshold for the oldest reads (beginning of context). */
-export const MAX_SUPERSESSION_THRESHOLD = 0.60;
+export const MAX_SUPERSESSION_THRESHOLD = 0.6;
 
 export interface ArchiveMetrics {
-  pointerId: string;
-  toolCallId: string;
+  coverage: number;
   index: number;
   lineCount: number;
-  coverage: number;
+  pointerId: string;
   threshold: number;
+  toolCallId: string;
 }
 
 /**
@@ -27,7 +27,9 @@ export function computeSupersessionThreshold(
   messageIndex: number,
   totalMessages: number
 ): number {
-  if (totalMessages <= 1) return MIN_SUPERSESSION_THRESHOLD;
+  if (totalMessages <= 1) {
+    return MIN_SUPERSESSION_THRESHOLD;
+  }
 
   // 0 = oldest, 1 = most recent
   const positionRatio = messageIndex / (totalMessages - 1);
@@ -41,16 +43,18 @@ export function computeSupersessionThreshold(
 
 function getArchiveRange(arc: ArchivedResult): LineRange {
   return {
-    start: arc.startLine,
     end: arc.startLine + arc.lineHashes.length - 1,
+    start: arc.startLine,
   };
 }
 
 function intersectRanges(a: LineRange, b: LineRange): LineRange | null {
   const start = Math.max(a.start, b.start);
   const end = Math.min(a.end, b.end);
-  if (start > end) return null;
-  return { start, end };
+  if (start > end) {
+    return null;
+  }
+  return { end, start };
 }
 
 /**
@@ -61,7 +65,9 @@ export function computeCoverage(
   target: ArchivedResult,
   laterReads: ArchivedResult[]
 ): number {
-  if (target.lineHashes.length === 0) return 0;
+  if (target.lineHashes.length === 0) {
+    return 0;
+  }
 
   const targetRange = getArchiveRange(target);
   const overlaps: LineRange[] = [];
@@ -101,24 +107,33 @@ export function computeArchiveMetrics(
   for (const pathArchives of archivesByPath.values()) {
     // Only consider archives that are present in the current compiled messages.
     const indexed = pathArchives
-      .map(arc => ({ arc, index: indexByToolCallId.get(arc.toolCallId) ?? -1 }))
-      .filter(x => x.index >= 0)
+      .map((arc) => ({
+        arc,
+        index: indexByToolCallId.get(arc.toolCallId) ?? -1,
+      }))
+      .filter((x) => x.index >= 0)
       .sort((a, b) => a.index - b.index);
 
-    for (let i = 0; i < indexed.length; i++) {
-      const entry = indexed[i]!;
+    for (let i = 0; i < indexed.length; i += 1) {
+      const entry = indexed[i];
+      if (!entry) {
+        continue;
+      }
       const { arc: target, index: targetIndex } = entry;
-      const laterReads = indexed.slice(i + 1).map(x => x.arc);
+      const laterReads = indexed.slice(i + 1).map((x) => x.arc);
       const coverage = computeCoverage(target, laterReads);
-      const threshold = computeSupersessionThreshold(targetIndex, messages.length);
+      const threshold = computeSupersessionThreshold(
+        targetIndex,
+        messages.length
+      );
 
       metrics.push({
-        pointerId: target.pointerId,
-        toolCallId: target.toolCallId,
+        coverage,
         index: targetIndex,
         lineCount: target.lineHashes.length,
-        coverage,
+        pointerId: target.pointerId,
         threshold,
+        toolCallId: target.toolCallId,
       });
     }
   }

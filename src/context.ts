@@ -1,13 +1,16 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { ArchivedResult } from "./types";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
+import { getEvictionContext, selectEvictionCandidates } from "./eviction";
 import type { ArchiveState } from "./state";
 import { findSupersededArchives } from "./supersession";
-import { getEvictionContext, selectEvictionCandidates } from "./eviction";
+import type { ArchivedResult } from "./types";
 
 export function createContextHandler(pi: ExtensionAPI, state: ArchiveState) {
   const { activeArchives, archivesByPath, rebuildState } = state;
 
-  pi.on("context", async (event, ctx: ExtensionContext) => {
+  pi.on("context", (event, ctx: ExtensionContext) => {
     try {
       rebuildState(ctx);
 
@@ -30,19 +33,25 @@ export function createContextHandler(pi: ExtensionAPI, state: ArchiveState) {
         archiveByToolCallId.set(arc.toolCallId, arc);
       }
 
-      const updated = event.messages.map(msg => {
-        if (msg.role !== "toolResult") return msg;
+      const updated = event.messages.map((msg) => {
+        if (msg.role !== "toolResult") {
+          return msg;
+        }
 
         const arc = archiveByToolCallId.get(msg.toolCallId);
-        if (!arc) return msg;
+        if (!arc) {
+          return msg;
+        }
 
         if (toReplace.has(arc.pointerId)) {
           return {
             ...msg,
-            content: [{
-              type: "text" as const,
-              text: `[Results Archive: ${arc.pointerId} (Invalidated - Stale)]`
-            }]
+            content: [
+              {
+                text: `[Results Archive: ${arc.pointerId} (Invalidated - Stale)]`,
+                type: "text" as const,
+              },
+            ],
           };
         }
 
@@ -52,7 +61,6 @@ export function createContextHandler(pi: ExtensionAPI, state: ArchiveState) {
       return { messages: updated };
     } catch (err) {
       console.warn("[Context Trimmer] Failed to process context hooks:", err);
-      return;
     }
   });
 }
