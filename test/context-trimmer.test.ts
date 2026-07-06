@@ -22,7 +22,7 @@ describe("Pi Context Trimmer Extension", () => {
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-trimmer-test-"));
-    sessionManager = SessionManager.inMemory();
+    sessionManager = SessionManager.inMemory(tempDir);
     const authStorage = AuthStorage.create(path.join(tempDir, "auth.json"));
     modelRegistry = ModelRegistry.create(authStorage);
 
@@ -78,48 +78,43 @@ describe("Pi Context Trimmer Extension", () => {
     expect(recallTool.definition.name).toBe("recall_result");
   });
 
-  it("should replace large read results with a virtual pointer and create an archive", async () => {
+  it("should not replace read results immediately (returns raw result in full)", async () => {
     const extensionPath = path.resolve("./index.ts");
     const result = await discoverAndLoadExtensions([extensionPath], tempDir, tempDir);
     const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
     runner.bindCore(extensionActions, extensionContextActions);
 
-    // Initial session start
     await runner.emit({ type: "session_start", reason: "startup" });
 
-    // Large content (> 2000 chars)
-    const largeContent = "x".repeat(2500);
+    const filePath = path.join(tempDir, "large_file.txt");
+    const fileContent = "Line 1\n" + "x".repeat(2500) + "\nLine 3";
+    fs.writeFileSync(filePath, fileContent, "utf8");
 
     const emitResult = await runner.emitToolResult({
       type: "tool_result",
       toolName: "read",
       toolCallId: "call-1",
-      input: { AbsolutePath: "/foo/bar.txt" },
-      content: [{ type: "text", text: largeContent }],
+      input: { AbsolutePath: filePath },
+      content: [{ type: "text", text: fileContent }],
       isError: false,
       details: undefined,
     });
 
-    expect(emitResult).toBeDefined();
-    const textContent = emitResult!.content?.[0];
-    expect(textContent).toBeDefined();
-    expect(textContent!.type).toBe("text");
-    
-    const text = (textContent as { text: string }).text;
-    expect(text).toMatch(/\[Results Archive: (ptr_[a-z0-9]+)\]/);
+    // Verify it returned undefined (did not compress/replace tool result raw payload)
+    expect(emitResult).toBeUndefined();
 
-    const pointerId = text.match(/ptr_[a-z0-9]+/)?.[0];
-    expect(pointerId).toBeDefined();
-
-    // Verify results archive entry exists in the branch
+    // Verify custom results-archive entry exists in session
     const branch = sessionManager.getBranch();
     const archiveEntry = branch.find(e => e.type === "custom" && e.customType === "results-archive");
     expect(archiveEntry).toBeDefined();
-    expect((archiveEntry as any).data.pointerId).toBe(pointerId);
-    expect((archiveEntry as any).data.originalContent).toContain(largeContent);
+    
+    const arcData = (archiveEntry as any).data;
+    expect(arcData.parameterKey).toBe(filePath);
+    expect(arcData.startLine).toBe(1);
+    expect(arcData.lineHashes).toHaveLength(3);
   });
 
-  it("should invalidate older read results targeting the same AbsolutePath", async () => {
+  it("should preserve raw content in context if the file on disk is unchanged", async () => {
     const extensionPath = path.resolve("./index.ts");
     const result = await discoverAndLoadExtensions([extensionPath], tempDir, tempDir);
     const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
@@ -127,108 +122,21 @@ describe("Pi Context Trimmer Extension", () => {
 
     await runner.emit({ type: "session_start", reason: "startup" });
 
-    const filePath = "/foo/bar.txt";
+    const filePath = path.join(tempDir, "file.txt");
+    const fileContent = "Line 1\n" + "a".repeat(2100) + "\nLine 3";
+    fs.writeFileSync(filePath, fileContent, "utf8");
 
-    // 1st Read
-    const firstResult = await runner.emitToolResult({
+    // Intercept read
+    await runner.emitToolResult({
       type: "tool_result",
       toolName: "read",
       toolCallId: "call-1",
       input: { AbsolutePath: filePath },
-      content: [{ type: "text", text: "a".repeat(2500) }],
-      isError: false,
-      details: undefined,
-    });
-    const firstPointerId = (firstResult!.content![0] as { text: string }).text.match(/ptr_[a-z0-9]+/)?.[0]!;
-
-    // 2nd Read (different toolCallId, same path)
-    const secondResult = await runner.emitToolResult({
-      type: "tool_result",
-      toolName: "read",
-      toolCallId: "call-2",
-      input: { AbsolutePath: filePath },
-      content: [{ type: "text", text: "b".repeat(2500) }],
-      isError: false,
-      details: undefined,
-    });
-    const secondPointerId = (secondResult!.content![0] as { text: string }).text.match(/ptr_[a-z0-9]+/)?.[0]!;
-
-    expect(firstPointerId).not.toBe(secondPointerId);
-
-    // Verify invalidation event exists
-    const branch = sessionManager.getBranch();
-    const invalidationEntry = branch.find(e => e.type === "custom" && e.customType === "invalidation-event");
-    expect(invalidationEntry).toBeDefined();
-    expect((invalidationEntry as any).data.supersededPointerId).toBe(firstPointerId);
-  });
-
-  it("should not invalidate grep results since invalidatePrior is false", async () => {
-    const extensionPath = path.resolve("./index.ts");
-    const result = await discoverAndLoadExtensions([extensionPath], tempDir, tempDir);
-    const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-    runner.bindCore(extensionActions, extensionContextActions);
-
-    await runner.emit({ type: "session_start", reason: "startup" });
-
-    // 1st Grep
-    await runner.emitToolResult({
-      type: "tool_result",
-      toolName: "grep",
-      toolCallId: "call-grep-1",
-      input: { SearchPath: "/src", Query: "foo" },
-      content: [{ type: "text", text: "a".repeat(4500) }],
+      content: [{ type: "text", text: fileContent }],
       isError: false,
       details: undefined,
     });
 
-    // 2nd Grep (same path & query)
-    await runner.emitToolResult({
-      type: "tool_result",
-      toolName: "grep",
-      toolCallId: "call-grep-2",
-      input: { SearchPath: "/src", Query: "foo" },
-      content: [{ type: "text", text: "b".repeat(4500) }],
-      isError: false,
-      details: undefined,
-    });
-
-    const branch = sessionManager.getBranch();
-    const invalidationEntry = branch.find(e => e.type === "custom" && e.customType === "invalidation-event");
-    expect(invalidationEntry).toBeUndefined(); // Should not exist
-  });
-
-  it("should rewrite context for invalidated pointers to include (Invalidated - Stale)", async () => {
-    const extensionPath = path.resolve("./index.ts");
-    const result = await discoverAndLoadExtensions([extensionPath], tempDir, tempDir);
-    const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-    runner.bindCore(extensionActions, extensionContextActions);
-
-    await runner.emit({ type: "session_start", reason: "startup" });
-
-    // 1st Read -> archives
-    const r1 = await runner.emitToolResult({
-      type: "tool_result",
-      toolName: "read",
-      toolCallId: "call-1",
-      input: { AbsolutePath: "/foo/bar.txt" },
-      content: [{ type: "text", text: "a".repeat(2500) }],
-      isError: false,
-      details: undefined,
-    });
-    const p1 = (r1!.content![0] as { text: string }).text;
-
-    // 2nd Read -> invalidates first
-    await runner.emitToolResult({
-      type: "tool_result",
-      toolName: "read",
-      toolCallId: "call-2",
-      input: { AbsolutePath: "/foo/bar.txt" },
-      content: [{ type: "text", text: "b".repeat(2500) }],
-      isError: false,
-      details: undefined,
-    });
-
-    // Verify context rewrite
     const messages: AgentMessage[] = [
       {
         role: "toolResult",
@@ -236,12 +144,154 @@ describe("Pi Context Trimmer Extension", () => {
         toolName: "read",
         isError: false,
         timestamp: Date.now(),
-        content: [{ type: "text", text: p1 }]
+        content: [{ type: "text", text: fileContent }]
+      }
+    ];
+
+    // Context compilation
+    const compiled = await runner.emitContext(messages);
+    const text = ((compiled[0] as any)!.content![0] as { text: string }).text;
+    
+    // Unchanged raw content should be preserved
+    expect(text).toBe(fileContent);
+    expect(text).not.toContain("Results Archive");
+  });
+
+  it("should replace raw content with stale pointer in context if a read line has changed", async () => {
+    const extensionPath = path.resolve("./index.ts");
+    const result = await discoverAndLoadExtensions([extensionPath], tempDir, tempDir);
+    const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+    runner.bindCore(extensionActions, extensionContextActions);
+
+    await runner.emit({ type: "session_start", reason: "startup" });
+
+    const filePath = path.join(tempDir, "file.txt");
+    const fileContent = "Line 1\n" + "a".repeat(2100) + "\nLine 3";
+    fs.writeFileSync(filePath, fileContent, "utf8");
+
+    await runner.emitToolResult({
+      type: "tool_result",
+      toolName: "read",
+      toolCallId: "call-1",
+      input: { AbsolutePath: filePath },
+      content: [{ type: "text", text: fileContent }],
+      isError: false,
+      details: undefined,
+    });
+
+    // Modify the file on disk (changes line 2)
+    fs.writeFileSync(filePath, "Line 1\n" + "different text\nLine 3", "utf8");
+
+    const messages: AgentMessage[] = [
+      {
+        role: "toolResult",
+        toolCallId: "call-1",
+        toolName: "read",
+        isError: false,
+        timestamp: Date.now(),
+        content: [{ type: "text", text: fileContent }]
+      }
+    ];
+
+    // Context compilation
+    const compiled = await runner.emitContext(messages);
+    const text = ((compiled[0] as any)!.content![0] as { text: string }).text;
+
+    // Content should be replaced with stale virtual pointer
+    expect(text).toContain("[Results Archive:");
+    expect(text).toContain("(Invalidated - Stale)");
+  });
+
+  it("should not invalidate read content if the disk change is outside the read line range", async () => {
+    const extensionPath = path.resolve("./index.ts");
+    const result = await discoverAndLoadExtensions([extensionPath], tempDir, tempDir);
+    const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+    runner.bindCore(extensionActions, extensionContextActions);
+
+    await runner.emit({ type: "session_start", reason: "startup" });
+
+    const filePath = path.join(tempDir, "file.txt");
+    // File has 10 lines
+    const lines = Array.from({ length: 10 }, (_, i) => `Line ${i + 1} ` + "x".repeat(300));
+    fs.writeFileSync(filePath, lines.join("\n"), "utf8");
+
+    // Partial read: lines 5 to 7 (offset 5, limit 3)
+    const readLines = lines.slice(4, 7);
+    const readText = readLines.join("\n");
+
+    await runner.emitToolResult({
+      type: "tool_result",
+      toolName: "read",
+      toolCallId: "call-1",
+      input: { AbsolutePath: filePath, offset: 5, limit: 3 },
+      content: [{ type: "text", text: readText }],
+      isError: false,
+      details: undefined,
+    });
+
+    // Modify line 1 and 2 on disk (outside the range of lines 5-7)
+    lines[0] = "Line 1 changed completely";
+    lines[1] = "Line 2 changed completely";
+    fs.writeFileSync(filePath, lines.join("\n"), "utf8");
+
+    const messages: AgentMessage[] = [
+      {
+        role: "toolResult",
+        toolCallId: "call-1",
+        toolName: "read",
+        isError: false,
+        timestamp: Date.now(),
+        content: [{ type: "text", text: readText }]
+      }
+    ];
+
+    // Context compilation
+    const compiled = await runner.emitContext(messages);
+    const text = ((compiled[0] as any)!.content![0] as { text: string }).text;
+
+    // Content should remain raw since lines 5-7 did not change
+    expect(text).toBe(readText);
+  });
+
+  it("should replace content with pointer if the file is deleted on disk", async () => {
+    const extensionPath = path.resolve("./index.ts");
+    const result = await discoverAndLoadExtensions([extensionPath], tempDir, tempDir);
+    const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+    runner.bindCore(extensionActions, extensionContextActions);
+
+    await runner.emit({ type: "session_start", reason: "startup" });
+
+    const filePath = path.join(tempDir, "file.txt");
+    const fileContent = "Line 1\n" + "a".repeat(2100);
+    fs.writeFileSync(filePath, fileContent, "utf8");
+
+    await runner.emitToolResult({
+      type: "tool_result",
+      toolName: "read",
+      toolCallId: "call-1",
+      input: { AbsolutePath: filePath },
+      content: [{ type: "text", text: fileContent }],
+      isError: false,
+      details: undefined,
+    });
+
+    // Delete file
+    fs.unlinkSync(filePath);
+
+    const messages: AgentMessage[] = [
+      {
+        role: "toolResult",
+        toolCallId: "call-1",
+        toolName: "read",
+        isError: false,
+        timestamp: Date.now(),
+        content: [{ type: "text", text: fileContent }]
       }
     ];
 
     const compiled = await runner.emitContext(messages);
     const text = ((compiled[0] as any)!.content![0] as { text: string }).text;
+
     expect(text).toContain("(Invalidated - Stale)");
   });
 
@@ -253,27 +303,30 @@ describe("Pi Context Trimmer Extension", () => {
 
     await runner.emit({ type: "session_start", reason: "startup" });
 
-    const contentText = "a".repeat(2500);
+    const filePath = path.join(tempDir, "file.txt");
+    const fileContent = "Line 1\n" + "a".repeat(2100);
+    fs.writeFileSync(filePath, fileContent, "utf8");
 
-    const r1 = await runner.emitToolResult({
+    await runner.emitToolResult({
       type: "tool_result",
       toolName: "read",
       toolCallId: "call-1",
-      input: { AbsolutePath: "/foo/bar.txt" },
-      content: [{ type: "text", text: contentText }],
+      input: { AbsolutePath: filePath },
+      content: [{ type: "text", text: fileContent }],
       isError: false,
       details: undefined,
     });
 
-    const pointerText = (r1!.content![0] as { text: string }).text;
-    const pointerId = pointerText.match(/ptr_[a-z0-9]+/)?.[0]!;
+    const branch = sessionManager.getBranch();
+    const arcData = (branch.find(e => e.type === "custom" && e.customType === "results-archive") as any).data;
+    const pointerId = arcData.pointerId;
 
     const ext = result.extensions[0];
     expect(ext).toBeDefined();
     const recallTool = ext!.tools.get("recall_result")!;
-    
-    // Recall Active Pointer
-    const executeResult = await recallTool.definition.execute(
+
+    // Recall active result
+    const activeResult = await recallTool.definition.execute(
       "recall-call-1",
       { pointer_id: pointerId },
       new AbortController().signal,
@@ -281,22 +334,15 @@ describe("Pi Context Trimmer Extension", () => {
       runner.createContext()
     );
 
-    expect((executeResult as any).isError).toBeFalsy();
-    expect((executeResult.content![0] as { text: string }).text).toContain(contentText);
+    expect((activeResult as any).isError).toBeFalsy();
+    expect(activeResult.details?.status).toBe("active");
+    expect((activeResult.content![0] as { text: string }).text).toBe(fileContent);
 
-    // Invalidate the pointer by calling read again
-    await runner.emitToolResult({
-      type: "tool_result",
-      toolName: "read",
-      toolCallId: "call-2",
-      input: { AbsolutePath: "/foo/bar.txt" },
-      content: [{ type: "text", text: "b".repeat(2500) }],
-      isError: false,
-      details: undefined,
-    });
+    // Modify file -> make it stale
+    fs.writeFileSync(filePath, "modified text", "utf8");
 
-    // Recall Invalidated/Stale Pointer
-    const executeStaleResult = await recallTool.definition.execute(
+    // Recall stale result
+    const staleResult = await recallTool.definition.execute(
       "recall-call-2",
       { pointer_id: pointerId },
       new AbortController().signal,
@@ -304,75 +350,9 @@ describe("Pi Context Trimmer Extension", () => {
       runner.createContext()
     );
 
-    expect((executeStaleResult as any).isError).toBeFalsy();
-    expect((executeStaleResult.content![0] as { text: string }).text).toContain("Warning: Pointer");
-    expect((executeStaleResult.details as any)?.status).toBe("invalidated");
-  });
-
-  it("should respect branch isolation for archives and invalidations", async () => {
-    const extensionPath = path.resolve("./index.ts");
-    const result = await discoverAndLoadExtensions([extensionPath], tempDir, tempDir);
-    const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-    runner.bindCore(extensionActions, extensionContextActions);
-
-    // Root session start
-    await runner.emit({ type: "session_start", reason: "startup" });
-
-    // Create a pointer in root
-    const r1 = await runner.emitToolResult({
-      type: "tool_result",
-      toolName: "read",
-      toolCallId: "call-root",
-      input: { AbsolutePath: "/foo/root.txt" },
-      content: [{ type: "text", text: "a".repeat(2500) }],
-      isError: false,
-      details: undefined,
-    });
-    const rootPointerText = (r1!.content![0] as { text: string }).text;
-    const rootBranchLeafId = sessionManager.getLeafId()!;
-
-    // BRANCH A
-    // In Branch A, we read root.txt again to invalidate the root pointer
-    await runner.emitToolResult({
-      type: "tool_result",
-      toolName: "read",
-      toolCallId: "call-branch-a",
-      input: { AbsolutePath: "/foo/root.txt" },
-      content: [{ type: "text", text: "b".repeat(2500) }],
-      isError: false,
-      details: undefined,
-    });
-    const leafIdA = sessionManager.getLeafId()!;
-
-    // Verify root pointer is invalidated in Branch A
-    await runner.emit({ type: "session_tree", oldLeafId: rootBranchLeafId, newLeafId: leafIdA });
-    const compiledA = await runner.emitContext([
-      { role: "toolResult", toolCallId: "call-root", toolName: "read", isError: false, timestamp: Date.now(), content: [{ type: "text", text: rootPointerText }] }
-    ]);
-    expect(((compiledA[0] as any)!.content![0] as { text: string }).text).toContain("(Invalidated - Stale)");
-
-    // BRANCH B (we navigate back to rootBranchLeafId, then do a different action)
-    // We navigate to rootBranchLeafId, then write a different file (no invalidation of root.txt)
-    sessionManager.branch(rootBranchLeafId);
-    await runner.emit({ type: "session_tree", oldLeafId: leafIdA, newLeafId: rootBranchLeafId });
-
-    await runner.emitToolResult({
-      type: "tool_result",
-      toolName: "read",
-      toolCallId: "call-branch-b",
-      input: { AbsolutePath: "/foo/branch-b.txt" },
-      content: [{ type: "text", text: "c".repeat(2500) }],
-      isError: false,
-      details: undefined,
-    });
-    const leafIdB = sessionManager.getLeafId()!;
-
-    // Verify root pointer is STILL ACTIVE in Branch B (not stale)
-    await runner.emit({ type: "session_tree", oldLeafId: rootBranchLeafId, newLeafId: leafIdB });
-    const compiledB = await runner.emitContext([
-      { role: "toolResult", toolCallId: "call-root", toolName: "read", isError: false, timestamp: Date.now(), content: [{ type: "text", text: rootPointerText }] }
-    ]);
-    expect(((compiledB[0] as any)!.content![0] as { text: string }).text).not.toContain("(Invalidated - Stale)");
-    expect(((compiledB[0] as any)!.content![0] as { text: string }).text).toBe(rootPointerText);
+    expect((staleResult as any).isError).toBeFalsy();
+    expect(staleResult.details?.status).toBe("invalidated");
+    expect((staleResult.content![0] as { text: string }).text).toContain("Warning: Pointer");
+    expect(staleResult.details?.originalContent[0].text).toBe(fileContent);
   });
 });
