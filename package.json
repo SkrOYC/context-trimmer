@@ -11,6 +11,7 @@
     "typescript": "^5"
   },
   "scripts": {
+    "benchmark": "bun run benchmark/index.ts",
     "test": "bun test",
     "test:coverage": "bun test --coverage",
     "check": "bunx --bun @biomejs/biome check",

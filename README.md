@@ -119,6 +119,29 @@ interface ArchivedResult {
 }
 ```
 
+## Benchmark
+
+A public-trace benchmark harness is included under `benchmark/`. It replays
+agent trajectories through the trimmer's eviction logic and compares the
+current algorithm against baselines using real model prices from
+[models.dev](https://models.dev) (opencode-go provider).
+
+```bash
+# Run against public SWE-agent and oni-devops traces
+bun run benchmark
+
+# Tune sample size and simulated context window
+bun run benchmark -- --max-swe 100 --context-window 32000
+```
+
+The harness measures:
+
+- **Compression ratio** — archive chars replaced / total archive chars
+- **KV-cache invalidation cost** — messages from the first replacement to the end of context
+- **Recall cost** — estimated `recall_result` calls needed for replaced archives
+- **Real dollar cost** — per-trace input/context spend plus recall output spend
+  for each opencode-go SOTA model price card
+
 ## Limitations
 
 - Only text content is hashed and tracked
