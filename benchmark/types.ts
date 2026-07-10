@@ -20,9 +20,12 @@ export interface ReplacementRecord {
 
 export interface TurnResult {
   baselineTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
   compiledMessages: number;
   compiledTokens: number;
   contextUsagePercent: number;
+  inputTokens: number;
   replacedArchives: number;
   replacedChars: number;
   totalArchiveChars: number;

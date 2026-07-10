@@ -3,31 +3,38 @@ import { join } from "node:path";
 
 export interface ModelPricing {
   cacheReadPrice: number;
+  cacheReadPriceOver200k: number;
   cacheWritePrice: number;
+  cacheWritePriceOver200k: number;
   inputPrice: number;
+  inputPriceOver200k: number;
   modelId: string;
   modelName: string;
   outputPrice: number;
+  outputPriceOver200k: number;
 }
 
 const MODELS_DEV_API_URL = "https://models.dev/api.json";
-
-const DEFAULT_SOTA_MODELS = [
-  { modelId: "deepseek-v4-pro", provider: "opencode-go" },
-  { modelId: "deepseek-v4-flash", provider: "opencode-go" },
-  { modelId: "qwen3.7-max", provider: "opencode-go" },
-  { modelId: "mimo-v2.5-pro", provider: "opencode-go" },
-  { modelId: "kimi-k2.7-code", provider: "opencode-go" },
-  { modelId: "minimax-m3", provider: "opencode-go" },
-  { modelId: "glm-5", provider: "opencode-go" },
-];
 
 interface ApiJsonModel {
   cost?: {
     cache_read?: number;
     cache_write?: number;
+    context_over_200k?: {
+      cache_read?: number;
+      cache_write?: number;
+      input?: number;
+      output?: number;
+    };
     input: number;
     output: number;
+    tiers?: Array<{
+      cache_read?: number;
+      cache_write?: number;
+      input?: number;
+      output?: number;
+      tier: { size?: number; type?: string };
+    }>;
   };
   name: string;
 }
@@ -66,41 +73,106 @@ async function fetchApiJson(cacheDir: string): Promise<ApiJson> {
   return data;
 }
 
-export async function fetchOpencodeGoPricing(
-  cacheDir: string,
-  models: Array<{ modelId: string; provider: string }> = DEFAULT_SOTA_MODELS
-): Promise<ModelPricing[]> {
-  const data = await fetchApiJson(cacheDir);
-  const results: ModelPricing[] = [];
-
-  for (const { modelId, provider } of models) {
-    const providerData = data[provider];
-    if (!providerData) {
-      console.warn(`  provider not found: ${provider}`);
-      continue;
-    }
-
-    const model = providerData.models[modelId];
-    if (!model) {
-      console.warn(`  model not found: ${provider}/${modelId}`);
-      continue;
-    }
-
-    if (!model.cost) {
-      console.warn(`  no pricing for ${provider}/${modelId}`);
-      continue;
-    }
-
-    results.push({
-      cacheReadPrice: model.cost.cache_read ?? 0,
-      cacheWritePrice: model.cost.cache_write ?? 0,
-      inputPrice: model.cost.input,
-      modelId: `${provider}/${modelId}`,
-      modelName: model.name,
-      outputPrice: model.cost.output,
-    });
+function extractOver200kCost(
+  cost: ApiJsonModel["cost"]
+): Pick<
+  ModelPricing,
+  "cacheReadPrice" | "cacheWritePrice" | "inputPrice" | "outputPrice"
+> | null {
+  if (!cost) {
+    return null;
   }
 
+  if (cost.context_over_200k) {
+    return {
+      cacheReadPrice: cost.context_over_200k.cache_read ?? cost.cache_read ?? 0,
+      cacheWritePrice:
+        cost.context_over_200k.cache_write ?? cost.cache_write ?? cost.input,
+      inputPrice: cost.context_over_200k.input ?? cost.input,
+      outputPrice: cost.context_over_200k.output ?? cost.output,
+    };
+  }
+
+  const tier = cost.tiers?.find(
+    (t) =>
+      t.tier.type === "context" &&
+      (t.tier.size === 200_000 || t.tier.size === 200_000)
+  );
+  if (tier) {
+    return {
+      cacheReadPrice: tier.cache_read ?? cost.cache_read ?? 0,
+      cacheWritePrice: tier.cache_write ?? cost.cache_write ?? cost.input,
+      inputPrice: tier.input ?? cost.input,
+      outputPrice: tier.output ?? cost.output,
+    };
+  }
+
+  return null;
+}
+
+function buildModelPricing(
+  provider: string,
+  modelId: string,
+  model: ApiJsonModel
+): ModelPricing | undefined {
+  if (!model.cost) {
+    return;
+  }
+
+  const over200k = extractOver200kCost(model.cost);
+  const cacheReadPrice = model.cost.cache_read ?? 0;
+  const cacheWritePrice = model.cost.cache_write ?? model.cost.input;
+
+  return {
+    cacheReadPrice,
+    cacheReadPriceOver200k: over200k?.cacheReadPrice ?? cacheReadPrice,
+    cacheWritePrice,
+    cacheWritePriceOver200k:
+      over200k?.cacheWritePrice ?? over200k?.inputPrice ?? cacheWritePrice,
+    inputPrice: model.cost.input,
+    inputPriceOver200k: over200k?.inputPrice ?? model.cost.input,
+    modelId: `${provider}/${modelId}`,
+    modelName: model.name,
+    outputPrice: model.cost.output,
+    outputPriceOver200k: over200k?.outputPrice ?? model.cost.output,
+  };
+}
+
+export async function fetchModelPricing(
+  cacheDir: string,
+  provider: string,
+  modelId: string
+): Promise<ModelPricing | undefined> {
+  const data = await fetchApiJson(cacheDir);
+  const providerData = data[provider];
+  if (!providerData) {
+    return;
+  }
+
+  const model = providerData.models[modelId];
+  if (!model) {
+    return;
+  }
+
+  return buildModelPricing(provider, modelId, model);
+}
+
+export async function fetchOpencodeGoPricing(
+  cacheDir: string
+): Promise<ModelPricing[]> {
+  const data = await fetchApiJson(cacheDir);
+  const providerData = data["opencode-go"];
+  if (!providerData) {
+    return [];
+  }
+
+  const results: ModelPricing[] = [];
+  for (const [id, model] of Object.entries(providerData.models)) {
+    const pricing = buildModelPricing("opencode-go", id, model);
+    if (pricing) {
+      results.push(pricing);
+    }
+  }
   return results;
 }
 

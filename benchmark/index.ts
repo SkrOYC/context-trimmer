@@ -14,7 +14,11 @@ import {
   fetchHuggingFaceRawFile,
   fetchHuggingFaceRows,
 } from "./fetch";
-import { fetchOpencodeGoPricing, type ModelPricing } from "./pricing";
+import {
+  fetchModelPricing,
+  fetchOpencodeGoPricing,
+  type ModelPricing,
+} from "./pricing";
 import { replayTrace } from "./replay";
 import type { ParsedTrace, TraceResult } from "./types";
 
@@ -355,6 +359,36 @@ function printCostComparison(
   }
 }
 
+async function processSource(
+  source: "swe-agent" | "oni-devops" | "toolathlon",
+  loader: (cacheDir: string, max: number) => Promise<ParsedTrace[]>,
+  maxTraces: number,
+  options: BenchmarkOptions,
+  pricing: ModelPricing[],
+  allResults: Map<string, TraceResult[]>
+): Promise<void> {
+  console.log(`\n--- Loading ${source} trajectories ---`);
+  const traces = await loader(options.cacheDir, maxTraces);
+  console.log(`Loaded ${traces.length} ${source} traces`);
+
+  const stats = traces.map(analyzeTrace);
+  printStats(aggregateStats(stats));
+
+  for (const contextWindow of options.contextWindows) {
+    console.log(`\n--- Context window: ${contextWindow.toLocaleString()} ---`);
+    const results = runBenchmarks(traces, source, contextWindow);
+    for (const [key, value] of results.entries()) {
+      allResults.set(`${key}:${contextWindow}`, value);
+    }
+    printComparison(
+      source,
+      results,
+      `${source} @ ${contextWindow.toLocaleString()}`
+    );
+    printCostComparison(source, results, pricing);
+  }
+}
+
 async function main(): Promise<void> {
   const options = parseArgs();
 
@@ -366,94 +400,59 @@ async function main(): Promise<void> {
   const pricing = await fetchOpencodeGoPricing(options.cacheDir);
   console.log(`Loaded ${pricing.length} model price cards`);
 
+  console.log("\n--- Fetching Claude 4.5 Opus pricing ---");
+  const copilotOpus = await fetchModelPricing(
+    options.cacheDir,
+    "github-copilot",
+    "claude-opus-4.5"
+  );
+  if (copilotOpus) {
+    pricing.push(copilotOpus);
+    console.log(`  Loaded ${copilotOpus.modelName} from github-copilot`);
+  }
+  const neonOpus = await fetchModelPricing(
+    options.cacheDir,
+    "neon",
+    "claude-opus-4-5"
+  );
+  if (neonOpus) {
+    pricing.push(neonOpus);
+    console.log(`  Loaded ${neonOpus.modelName} from neon`);
+  }
+
   const allResults = new Map<string, TraceResult[]>();
 
   if (options.sources.has("swe-agent")) {
-    console.log("\n--- Loading SWE-agent trajectories ---");
-    const sweTraces = await loadSweAgentTraces(
-      options.cacheDir,
-      options.maxSweTraces
+    await processSource(
+      "swe-agent",
+      loadSweAgentTraces,
+      options.maxSweTraces,
+      options,
+      pricing,
+      allResults
     );
-    console.log(`Loaded ${sweTraces.length} SWE-agent traces`);
-
-    const stats = sweTraces.map(analyzeTrace);
-    printStats(aggregateStats(stats));
-
-    for (const contextWindow of options.contextWindows) {
-      console.log(
-        `\n--- Context window: ${contextWindow.toLocaleString()} ---`
-      );
-      const sweResults = runBenchmarks(sweTraces, "swe-agent", contextWindow);
-      for (const [key, value] of sweResults.entries()) {
-        allResults.set(`${key}:${contextWindow}`, value);
-      }
-      printComparison(
-        "swe-agent",
-        sweResults,
-        `swe-agent @ ${contextWindow.toLocaleString()}`
-      );
-      printCostComparison("swe-agent", sweResults, pricing);
-    }
   }
 
   if (options.sources.has("oni-devops")) {
-    console.log("\n--- Loading oni-devops traces ---");
-    const oniTraces = await loadOniTraces(
-      options.cacheDir,
-      options.maxOniTraces
+    await processSource(
+      "oni-devops",
+      loadOniTraces,
+      options.maxOniTraces,
+      options,
+      pricing,
+      allResults
     );
-    console.log(`Loaded ${oniTraces.length} oni-devops traces`);
-
-    const stats = oniTraces.map(analyzeTrace);
-    printStats(aggregateStats(stats));
-
-    for (const contextWindow of options.contextWindows) {
-      console.log(
-        `\n--- Context window: ${contextWindow.toLocaleString()} ---`
-      );
-      const oniResults = runBenchmarks(oniTraces, "oni-devops", contextWindow);
-      for (const [key, value] of oniResults.entries()) {
-        allResults.set(`${key}:${contextWindow}`, value);
-      }
-      printComparison(
-        "oni-devops",
-        oniResults,
-        `oni-devops @ ${contextWindow.toLocaleString()}`
-      );
-      printCostComparison("oni-devops", oniResults, pricing);
-    }
   }
 
   if (options.sources.has("toolathlon")) {
-    console.log("\n--- Loading Toolathlon trajectories ---");
-    const toolathlonTraces = await loadToolathlonTraces(
-      options.cacheDir,
-      options.maxToolathlonTraces
+    await processSource(
+      "toolathlon",
+      loadToolathlonTraces,
+      options.maxToolathlonTraces,
+      options,
+      pricing,
+      allResults
     );
-    console.log(`Loaded ${toolathlonTraces.length} Toolathlon traces`);
-
-    const stats = toolathlonTraces.map(analyzeTrace);
-    printStats(aggregateStats(stats));
-
-    for (const contextWindow of options.contextWindows) {
-      console.log(
-        `\n--- Context window: ${contextWindow.toLocaleString()} ---`
-      );
-      const toolathlonResults = runBenchmarks(
-        toolathlonTraces,
-        "toolathlon",
-        contextWindow
-      );
-      for (const [key, value] of toolathlonResults.entries()) {
-        allResults.set(`${key}:${contextWindow}`, value);
-      }
-      printComparison(
-        "toolathlon",
-        toolathlonResults,
-        `toolathlon @ ${contextWindow.toLocaleString()}`
-      );
-      printCostComparison("toolathlon", toolathlonResults, pricing);
-    }
   }
 
   const reportPath = join(options.cacheDir, "benchmark-report.json");

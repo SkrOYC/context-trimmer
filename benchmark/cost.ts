@@ -94,23 +94,81 @@ export function computeTraceDollarCost(
   result: TraceResult,
   pricing: ModelPricing
 ): DollarCost {
-  const inputPrice = pricePerToken(pricing.inputPrice);
-  const outputPrice = pricePerToken(pricing.outputPrice);
+  const hasCaching = pricing.cacheReadPrice > 0;
 
-  const baselineCost = result.turnResults.reduce(
-    (sum, turn) => sum + turn.baselineTokens * inputPrice,
-    0
+  let lastBaselineTokens = 0;
+  let baselineCost = 0;
+  let trimmerContextCost = 0;
+
+  for (const turn of result.turnResults) {
+    // Baseline caching logic
+    const baselineCacheRead = lastBaselineTokens;
+    const baselineCacheWrite = Math.max(
+      0,
+      turn.baselineTokens - lastBaselineTokens
+    );
+    lastBaselineTokens = turn.baselineTokens;
+
+    const baselineUseOver200k = turn.baselineTokens > 200_000;
+    const baselineInputPrice = pricePerToken(
+      baselineUseOver200k ? pricing.inputPriceOver200k : pricing.inputPrice
+    );
+    const baselineCacheReadPrice = pricePerToken(
+      baselineUseOver200k
+        ? pricing.cacheReadPriceOver200k
+        : pricing.cacheReadPrice
+    );
+    const baselineCacheWritePrice = pricePerToken(
+      baselineUseOver200k
+        ? pricing.cacheWritePriceOver200k
+        : pricing.cacheWritePrice
+    );
+
+    if (hasCaching) {
+      baselineCost +=
+        baselineCacheRead * baselineCacheReadPrice +
+        baselineCacheWrite * baselineCacheWritePrice;
+    } else {
+      baselineCost += turn.baselineTokens * baselineInputPrice;
+    }
+
+    // Trimmer caching logic
+    const trimmerUseOver200k = turn.compiledTokens > 200_000;
+    const trimmerInputPrice = pricePerToken(
+      trimmerUseOver200k ? pricing.inputPriceOver200k : pricing.inputPrice
+    );
+    const trimmerCacheReadPrice = pricePerToken(
+      trimmerUseOver200k
+        ? pricing.cacheReadPriceOver200k
+        : pricing.cacheReadPrice
+    );
+    const trimmerCacheWritePrice = pricePerToken(
+      trimmerUseOver200k
+        ? pricing.cacheWritePriceOver200k
+        : pricing.cacheWritePrice
+    );
+
+    if (hasCaching) {
+      trimmerContextCost +=
+        turn.cacheReadTokens * trimmerCacheReadPrice +
+        turn.cacheWriteTokens * trimmerCacheWritePrice;
+    } else {
+      trimmerContextCost += turn.compiledTokens * trimmerInputPrice;
+    }
+  }
+
+  // Estimate recall cost: one recall_result call per replaced archive.
+  const lastTurn = result.turnResults.at(-1);
+  const lastTurnUseOver200k = lastTurn
+    ? lastTurn.compiledTokens > 200_000
+    : false;
+  const finalInputPrice = pricePerToken(
+    lastTurnUseOver200k ? pricing.inputPriceOver200k : pricing.inputPrice
+  );
+  const finalOutputPrice = pricePerToken(
+    lastTurnUseOver200k ? pricing.outputPriceOver200k : pricing.outputPrice
   );
 
-  const trimmerContextCost = result.turnResults.reduce(
-    (sum, turn) => sum + turn.compiledTokens * inputPrice,
-    0
-  );
-
-  // Estimate recall cost: one recall_result call per replaced archive. The
-  // call itself consumes input tokens; the returned original content consumes
-  // output tokens. We approximate the returned content size by the average
-  // replaced chunk size.
   const avgRecalledTokens =
     result.replacedCount === 0
       ? 0
@@ -118,7 +176,8 @@ export function computeTraceDollarCost(
 
   const recallCost =
     result.replacedCount *
-    (RECALL_INPUT_TOKENS * inputPrice + avgRecalledTokens * outputPrice);
+    (RECALL_INPUT_TOKENS * finalInputPrice +
+      avgRecalledTokens * finalOutputPrice);
 
   const trimmerCost = trimmerContextCost + recallCost;
 

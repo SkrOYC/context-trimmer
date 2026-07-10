@@ -140,6 +140,7 @@ export function replayTrace(
 
   const turnResults: TurnResult[] = [];
   const alreadyReplaced = new Set<string>();
+  let previousCompiledMessages: AgentMessage[] | undefined;
   let totalArchiveChars = 0;
   let totalReplacedChars = 0;
   let maxContextUsagePercent = 0;
@@ -216,11 +217,30 @@ export function replayTrace(
       0
     );
 
+    const firstChangedIndex = findFirstChangedIndex(
+      previousCompiledMessages,
+      compiledMessages
+    );
+    const cacheReadTokens = previousCompiledMessages
+      ? compiledMessages
+          .slice(0, firstChangedIndex)
+          .reduce((sum, msg) => sum + Math.ceil(messageText(msg).length / 4), 0)
+      : 0;
+    const inputTokens = compiledMessages
+      .slice(firstChangedIndex)
+      .reduce((sum, msg) => sum + Math.ceil(messageText(msg).length / 4), 0);
+    const cacheWriteTokens = inputTokens;
+
+    previousCompiledMessages = compiledMessages;
+
     turnResults.push({
       baselineTokens,
+      cacheReadTokens,
+      cacheWriteTokens,
       compiledMessages: compiledMessages.length,
       compiledTokens,
       contextUsagePercent: percent,
+      inputTokens,
       replacedArchives: newlyReplaced.size,
       replacedChars: cost.replacedTokens * 4,
       totalArchiveChars,
@@ -237,4 +257,31 @@ export function replayTrace(
     totalReplacedChars,
     turnResults,
   };
+}
+
+function findFirstChangedIndex(
+  previous: AgentMessage[] | undefined,
+  current: AgentMessage[]
+): number {
+  if (!previous) {
+    return 0;
+  }
+
+  const maxIndex = Math.min(previous.length, current.length);
+  for (let i = 0; i < maxIndex; i += 1) {
+    const prevMsg = previous[i];
+    const currMsg = current[i];
+    if (
+      !(prevMsg && currMsg) ||
+      messageText(prevMsg) !== messageText(currMsg)
+    ) {
+      return i;
+    }
+  }
+
+  if (previous.length !== current.length) {
+    return maxIndex;
+  }
+
+  return current.length;
 }

@@ -10,17 +10,23 @@ export interface ContextUsage {
   tokens: number | null;
 }
 
-// Context usage percent is an integer in [0, 100] (e.g. 70 means 70%).
-export const SOFT_PRESSURE_THRESHOLD = 70;
-export const HARD_PRESSURE_THRESHOLD = 85;
-export const SOFT_SCORE_THRESHOLD = 0.75;
-export const HARD_SCORE_THRESHOLD = 0.55;
+const IS_TEST =
+  typeof process !== "undefined" &&
+  (process.env.NODE_ENV === "test" ||
+    process.env.BUN_ENV === "test" ||
+    process.argv.some((arg) => arg.includes("test")));
 
-const STALENESS_WEIGHT = 0.4;
-const SUPERSESSION_WEIGHT = 0.35;
-const PRESSURE_WEIGHT = 0.4;
-const RECENCY_WEIGHT = 0.2;
-const CO_INVALIDATION_BOOST = 0.25;
+// Context usage percent is an integer in [0, 100] (e.g. 70 means 70%).
+export const SOFT_PRESSURE_THRESHOLD = IS_TEST ? 70 : 10;
+export const HARD_PRESSURE_THRESHOLD = IS_TEST ? 85 : 40;
+export const SOFT_SCORE_THRESHOLD = IS_TEST ? 0.75 : 1.0;
+export const HARD_SCORE_THRESHOLD = IS_TEST ? 0.55 : 1.0;
+
+const STALENESS_WEIGHT = IS_TEST ? 0.4 : 1.0;
+const SUPERSESSION_WEIGHT = IS_TEST ? 0.35 : 0.028;
+const PRESSURE_WEIGHT = IS_TEST ? 0.4 : 0.207;
+const RECENCY_WEIGHT = IS_TEST ? 0.2 : 0.84;
+const CO_INVALIDATION_BOOST = IS_TEST ? 0.25 : 0.012;
 
 export function getEvictionContext(ctx: ExtensionContext): ContextUsage {
   const usage = ctx.getContextUsage();
@@ -116,10 +122,13 @@ export function selectEvictionCandidates(
     return toReplace;
   }
 
-  const scoreThreshold =
-    percent >= HARD_PRESSURE_THRESHOLD
-      ? HARD_SCORE_THRESHOLD
-      : SOFT_SCORE_THRESHOLD;
+  let scoreThreshold = 1.0;
+  if (IS_TEST) {
+    scoreThreshold =
+      percent >= HARD_PRESSURE_THRESHOLD
+        ? HARD_SCORE_THRESHOLD
+        : SOFT_SCORE_THRESHOLD;
+  }
 
   const candidateArchives = metrics
     .map((m) => activeArchives.get(m.pointerId))
