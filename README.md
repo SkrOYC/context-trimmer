@@ -127,11 +127,14 @@ current algorithm against baselines using real model prices from
 [models.dev](https://models.dev) (opencode-go provider).
 
 ```bash
-# Run against public SWE-agent and oni-devops traces
+# Run against public SWE-agent and oni-devops traces (default 200k window)
 bun run benchmark
 
-# Tune sample size and simulated context window
-bun run benchmark -- --max-swe 100 --context-window 32000
+# Sweep context windows to see pressure-based eviction kick in
+bun run benchmark -- --context-window 32000,64000,128000,200000
+
+# Tune sample size
+bun run benchmark -- --max-swe 100 --context-window 200000
 ```
 
 The harness measures:
@@ -141,6 +144,10 @@ The harness measures:
 - **Recall cost** — estimated `recall_result` calls needed for replaced archives
 - **Real dollar cost** — per-trace input/context spend plus recall output spend
   for each opencode-go SOTA model price card
+
+Because public SWE-agent trajectories peak around ~15k tokens, the default
+200k window mainly exercises supersession; smaller windows act as stress tests
+for pressure-based eviction.
 
 ## Limitations
 

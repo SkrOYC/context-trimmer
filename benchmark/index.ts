@@ -25,7 +25,7 @@ const ONI_JSONL_URL =
 
 interface BenchmarkOptions {
   cacheDir: string;
-  contextWindow: number;
+  contextWindows: number[];
   maxOniTraces: number;
   maxSweTraces: number;
   sources: Set<"swe-agent" | "oni-devops">;
@@ -47,13 +47,16 @@ function parseArgs(): BenchmarkOptions {
   }
 
   const cacheDir = getArg(args, "--cache-dir") ?? DEFAULT_CACHE_DIR;
-  const contextWindow = Number(getArg(args, "--context-window") ?? "128000");
+  const contextWindowArg = getArg(args, "--context-window");
+  const contextWindows = contextWindowArg
+    ? contextWindowArg.split(",").map(Number)
+    : [200_000];
   const maxSweTraces = Number(getArg(args, "--max-swe") ?? "50");
   const maxOniTraces = Number(getArg(args, "--max-oni") ?? "100");
 
   return {
     cacheDir,
-    contextWindow,
+    contextWindows,
     maxOniTraces,
     maxSweTraces,
     sources,
@@ -326,16 +329,20 @@ async function main(): Promise<void> {
     const stats = sweTraces.map(analyzeTrace);
     printStats(aggregateStats(stats));
 
-    const sweResults = runBenchmarks(
-      sweTraces,
-      "swe-agent",
-      options.contextWindow
-    );
-    for (const [key, value] of sweResults.entries()) {
-      allResults.set(key, value);
+    for (const contextWindow of options.contextWindows) {
+      console.log(
+        `\n--- Context window: ${contextWindow.toLocaleString()} ---`
+      );
+      const sweResults = runBenchmarks(sweTraces, "swe-agent", contextWindow);
+      for (const [key, value] of sweResults.entries()) {
+        allResults.set(`${key}:${contextWindow}`, value);
+      }
+      printComparison(
+        `swe-agent @ ${contextWindow.toLocaleString()}`,
+        sweResults
+      );
+      printCostComparison("swe-agent", sweResults, pricing);
     }
-    printComparison("swe-agent", sweResults);
-    printCostComparison("swe-agent", sweResults, pricing);
   }
 
   if (options.sources.has("oni-devops")) {
@@ -349,16 +356,20 @@ async function main(): Promise<void> {
     const stats = oniTraces.map(analyzeTrace);
     printStats(aggregateStats(stats));
 
-    const oniResults = runBenchmarks(
-      oniTraces,
-      "oni-devops",
-      options.contextWindow
-    );
-    for (const [key, value] of oniResults.entries()) {
-      allResults.set(key, value);
+    for (const contextWindow of options.contextWindows) {
+      console.log(
+        `\n--- Context window: ${contextWindow.toLocaleString()} ---`
+      );
+      const oniResults = runBenchmarks(oniTraces, "oni-devops", contextWindow);
+      for (const [key, value] of oniResults.entries()) {
+        allResults.set(`${key}:${contextWindow}`, value);
+      }
+      printComparison(
+        `oni-devops @ ${contextWindow.toLocaleString()}`,
+        oniResults
+      );
+      printCostComparison("oni-devops", oniResults, pricing);
     }
-    printComparison("oni-devops", oniResults);
-    printCostComparison("oni-devops", oniResults, pricing);
   }
 
   const reportPath = join(options.cacheDir, "benchmark-report.json");

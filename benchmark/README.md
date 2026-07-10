@@ -23,7 +23,17 @@ bun run benchmark
 Options:
 
 ```bash
-bun run benchmark -- --max-swe 100 --max-oni 100 --context-window 32000
+# Default: 200k context window (realistic for modern SOTA models)
+bun run benchmark
+
+# Stress-test at smaller windows to see pressure-based eviction
+bun run benchmark -- --context-window 32000
+
+# Sweep multiple windows
+bun run benchmark -- --context-window 32000,64000,128000,200000
+
+# Tune samples
+bun run benchmark -- --max-swe 100 --max-oni 100
 bun run benchmark -- --swe-agent
 bun run benchmark -- --oni-devops
 ```
@@ -58,7 +68,24 @@ For every turn of every trace we replay:
 - `current-70`: the trimmer's composite score (staleness + supersession +
   pressure + recency + co-invalidation boost) with the default thresholds.
 
+## A note on context-window size
+
+The default context window is **200,000 tokens**, which matches modern SOTA
+coding models. However, the public SWE-agent trajectories in this benchmark
+peak at roughly **15k tokens** (≈32% of 200k), and the oni-devops traces are
+much shorter. At 200k the pressure-based algorithms (`current-70`,
+`oldest-first-30`) rarely trigger, so most observed savings come from
+supersession.
+
+Smaller windows (32k–128k) are therefore useful as **stress tests**: they
+simulate what would happen if the same trace pattern continued until it hit
+pressure. The `--context-window` flag accepts a comma-separated list so you
+can sweep and see the transition from "no pressure" to "heavy pressure".
+
+Longer public coding-agent traces would be needed for a fully realistic 200k
+pressure evaluation.
+
 ## Output
 
-A metrics table and a dollar-cost table are printed per source. A JSON report
-is written to `.benchmark-cache/benchmark-report.json`.
+A metrics table and a dollar-cost table are printed per source and context
+window. A JSON report is written to `.benchmark-cache/benchmark-report.json`.
