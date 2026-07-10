@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ArchivedResult, LineRange } from "./types";
+import type { ArchivedResult, LineRange, SupersessionStrategy } from "./types";
 import { mergeIntervals, totalIntervalLength } from "./utils";
 
 /** Minimum threshold for the most recent reads (end of context). */
@@ -7,6 +7,9 @@ export const MIN_SUPERSESSION_THRESHOLD = 0.25;
 
 /** Maximum threshold for the oldest reads (beginning of context). */
 export const MAX_SUPERSESSION_THRESHOLD = 0.6;
+
+/** Full coverage value used for exact-key supersession. */
+const FULL_COVERAGE = 1;
 
 export interface ArchiveMetrics {
   coverage: number;
@@ -57,11 +60,7 @@ function intersectRanges(a: LineRange, b: LineRange): LineRange | null {
   return { end, start };
 }
 
-/**
- * Compute what fraction of `target` read's line range has been covered by any
- * of the `laterReads` (assumed to be newer reads of the same file).
- */
-export function computeCoverage(
+function computeLineRangeCoverage(
   target: ArchivedResult,
   laterReads: ArchivedResult[]
 ): number {
@@ -83,6 +82,32 @@ export function computeCoverage(
   const merged = mergeIntervals(overlaps);
   const covered = totalIntervalLength(merged);
   return covered / target.lineHashes.length;
+}
+
+function getSupersessionStrategy(arc: ArchivedResult): SupersessionStrategy {
+  return arc.supersessionStrategy ?? "line-range";
+}
+
+/**
+ * Compute what fraction of `target` archive has been superseded by `laterReads`
+ * of the same tool/parameter group. Line-range archives compare line coverage;
+ * exact-key archives are fully superseded if any later read shares the group.
+ */
+export function computeCoverage(
+  target: ArchivedResult,
+  laterReads: ArchivedResult[]
+): number {
+  const strategy = getSupersessionStrategy(target);
+
+  if (strategy === "exact-key") {
+    return laterReads.length > 0 ? FULL_COVERAGE : 0;
+  }
+
+  if (strategy === "none") {
+    return 0;
+  }
+
+  return computeLineRangeCoverage(target, laterReads);
 }
 
 /**
@@ -139,27 +164,4 @@ export function computeArchiveMetrics(
   }
 
   return metrics;
-}
-
-/**
- * Build a set of pointer IDs that should be replaced with pointers because
- * newer reads of the same file have cumulatively covered enough of their range.
- *
- * Only archives whose toolCallId appears in the current compiled messages are
- * considered. This ensures compacted or out-of-branch reads do not participate
- * in supersession decisions for the visible context.
- */
-export function findSupersededArchives(
-  messages: AgentMessage[],
-  archivesByPath: Map<string, ArchivedResult[]>
-): Set<string> {
-  const superseded = new Set<string>();
-
-  for (const m of computeArchiveMetrics(messages, archivesByPath)) {
-    if (m.coverage >= m.threshold) {
-      superseded.add(m.pointerId);
-    }
-  }
-
-  return superseded;
 }

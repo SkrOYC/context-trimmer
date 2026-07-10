@@ -4,7 +4,6 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { getEvictionContext, selectEvictionCandidates } from "./eviction";
 import type { ArchiveState } from "./state";
-import { findSupersededArchives } from "./supersession";
 import type { ArchivedResult } from "./types";
 
 export function createContextHandler(pi: ExtensionAPI, state: ArchiveState) {
@@ -14,16 +13,14 @@ export function createContextHandler(pi: ExtensionAPI, state: ArchiveState) {
     try {
       rebuildState(ctx);
 
-      // Compute superseded reads and pressure-based eviction candidates in one
-      // pass. Replacements are batched so the KV-cache miss is paid once, and
-      // the next turn sees a stable prefix.
-      const superseded = findSupersededArchives(event.messages, archivesByPath);
+      // Select archives to replace using a single eviction score. Supersession
+      // coverage is one input to that score, not a separate automatic replacement
+      // trigger, so we avoid unnecessary KV-cache invalidations.
       const toReplace = selectEvictionCandidates(
         event.messages,
         archivesByPath,
         activeArchives,
         getEvictionContext(ctx),
-        superseded,
         ctx.cwd
       );
 

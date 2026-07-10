@@ -111,7 +111,8 @@ describe("Pi Context Trimmer Extension", () => {
 
   function makeToolResultMessage(
     toolCallId: string,
-    text: string
+    text: string,
+    toolName = "read"
   ): AgentMessage {
     return {
       content: [{ text, type: "text" }],
@@ -119,7 +120,36 @@ describe("Pi Context Trimmer Extension", () => {
       role: "toolResult",
       timestamp: Date.now(),
       toolCallId,
-      toolName: "read",
+      toolName,
+    };
+  }
+
+  function makeBashResult(toolCallId: string, command: string, text: string) {
+    return {
+      content: [{ text, type: "text" as const }],
+      details: undefined,
+      input: { command },
+      isError: false,
+      toolCallId,
+      toolName: "bash" as const,
+      type: "tool_result" as const,
+    };
+  }
+
+  function makeGrepResult(
+    toolCallId: string,
+    pattern: string,
+    text: string,
+    path?: string
+  ) {
+    return {
+      content: [{ text, type: "text" as const }],
+      details: undefined,
+      input: { pattern, ...(path && { path }) },
+      isError: false,
+      toolCallId,
+      toolName: "grep" as const,
+      type: "tool_result" as const,
     };
   }
 
@@ -246,8 +276,12 @@ describe("Pi Context Trimmer Extension", () => {
     expect(text).not.toContain("Results Archive");
   });
 
-  it("should replace an old read when a newer read covers >=60% of its range", async () => {
-    const { runner } = await loadExtension();
+  it("should replace an old read when a newer read covers >=60% of its range under pressure", async () => {
+    const { runner } = await loadExtension({
+      contextWindow: 200_000,
+      percent: 90,
+      tokens: 180_000,
+    });
 
     const filePath = join(tempDir, "file.txt");
     const lines = Array.from(
@@ -342,8 +376,12 @@ describe("Pi Context Trimmer Extension", () => {
     );
   });
 
-  it("should accumulate overlap from multiple newer reads to supersede an old read", async () => {
-    const { runner } = await loadExtension();
+  it("should accumulate overlap from multiple newer reads to supersede an old read under pressure", async () => {
+    const { runner } = await loadExtension({
+      contextWindow: 200_000,
+      percent: 90,
+      tokens: 180_000,
+    });
 
     const filePath = join(tempDir, "file.txt");
     const lines = Array.from(
@@ -378,18 +416,6 @@ describe("Pi Context Trimmer Extension", () => {
       makeReadResult("call-3", { limit: 66, offset: 75, path: filePath }, text3)
     );
 
-    // Cumulative coverage so far: lines 75-180 = 106 lines / 200 = 53% < 60%
-    // Not yet superseded.
-    const messagesBefore: AgentMessage[] = [
-      makeToolResultMessage("call-1", oldText),
-      makeToolResultMessage("call-2", text2),
-      makeToolResultMessage("call-3", text3),
-    ];
-    const compiledBefore = await runner.emitContext(messagesBefore);
-    expect(
-      ((compiledBefore[0] as any)?.content?.[0] as { text: string }).text
-    ).toBe(oldText);
-
     // Newer read 4: lines 1-74 (74 lines)
     const text4 = lines.slice(0, 74).join("\n");
     await runner.emitToolResult(
@@ -409,8 +435,12 @@ describe("Pi Context Trimmer Extension", () => {
     ).toContain("[Results Archive:");
   });
 
-  it("should replace a recent read at a lower overlap threshold than an old read", async () => {
-    const { runner } = await loadExtension();
+  it("should replace a recent read at a lower overlap threshold than an old read under pressure", async () => {
+    const { runner } = await loadExtension({
+      contextWindow: 200_000,
+      percent: 90,
+      tokens: 180_000,
+    });
 
     const filePath = join(tempDir, "file.txt");
     const lines = Array.from(
@@ -461,8 +491,12 @@ describe("Pi Context Trimmer Extension", () => {
     );
   });
 
-  it("should handle cascading supersession across multiple reads", async () => {
-    const { runner } = await loadExtension();
+  it("should handle cascading supersession across multiple reads under pressure", async () => {
+    const { runner } = await loadExtension({
+      contextWindow: 200_000,
+      percent: 90,
+      tokens: 180_000,
+    });
 
     const filePath = join(tempDir, "file.txt");
     const lines = Array.from(
@@ -964,16 +998,16 @@ describe("Pi Context Trimmer Extension", () => {
     expect(archiveEntry).toBeUndefined();
   });
 
-  it("should ignore non-read tool results", async () => {
+  it("should ignore unsupported tool results", async () => {
     const { runner } = await loadExtension();
 
     const emitResult = await runner.emitToolResult({
-      content: [{ text: "hello", type: "text" }],
+      content: [{ text: "wrote file", type: "text" }],
       details: undefined,
-      input: { command: "echo hello" },
+      input: { content: "hello", path: "file.txt" },
       isError: false,
-      toolCallId: "call-bash",
-      toolName: "bash",
+      toolCallId: "call-write",
+      toolName: "write",
       type: "tool_result",
     } as any);
 
@@ -984,5 +1018,153 @@ describe("Pi Context Trimmer Extension", () => {
       (e) => e.type === "custom" && e.customType === "results-archive"
     );
     expect(archiveEntry).toBeUndefined();
+  });
+
+  it("should archive bash tool results", async () => {
+    const { runner } = await loadExtension();
+
+    const emitResult = await runner.emitToolResult(
+      makeBashResult("call-bash", "echo hello", "hello")
+    );
+
+    expect(emitResult).toBeUndefined();
+
+    const branch = sessionManager.getBranch();
+    const archiveEntry = branch.find(
+      (e) => e.type === "custom" && e.customType === "results-archive"
+    );
+    expect(archiveEntry).toBeDefined();
+
+    const arcData = (archiveEntry as any).data;
+    expect(arcData.toolName).toBe("bash");
+    expect(arcData.parameterKey).toBe("echo hello");
+    expect(arcData.stalenessStrategy).toBe("immutable");
+    expect(arcData.supersessionStrategy).toBe("exact-key");
+  });
+
+  it("should supersede an older bash result when the same command is run again under pressure", async () => {
+    const { runner } = await loadExtension({
+      contextWindow: 200_000,
+      percent: 75,
+      tokens: 150_000,
+    });
+
+    const oldText = "old output";
+    const newText = "new output";
+
+    await runner.emitToolResult(
+      makeBashResult("call-bash-1", "git status", oldText)
+    );
+    await runner.emitToolResult(
+      makeBashResult("call-bash-2", "git status", newText)
+    );
+
+    const messages: AgentMessage[] = [
+      makeToolResultMessage("call-bash-1", oldText, "bash"),
+      makeToolResultMessage("call-bash-2", newText, "bash"),
+    ];
+
+    const compiled = await runner.emitContext(messages);
+
+    // Older result is superseded and evicted under pressure.
+    expect(
+      ((compiled[0] as any)?.content?.[0] as { text: string }).text
+    ).toContain("[Results Archive:");
+    // The newer result is also an immutable bash archive; once the older one
+    // triggers a KV-cache suffix invalidation, the co-invalidation boost pushes
+    // the newer one over the threshold too.
+    expect(
+      ((compiled[1] as any)?.content?.[0] as { text: string }).text
+    ).toContain("[Results Archive:");
+  });
+
+  it("should not supersede bash results with different commands", async () => {
+    const { runner } = await loadExtension();
+
+    const text1 = "output 1";
+    const text2 = "output 2";
+
+    await runner.emitToolResult(
+      makeBashResult("call-bash-1", "git status", text1)
+    );
+    await runner.emitToolResult(
+      makeBashResult("call-bash-2", "git log", text2)
+    );
+
+    const messages: AgentMessage[] = [
+      makeToolResultMessage("call-bash-1", text1, "bash"),
+      makeToolResultMessage("call-bash-2", text2, "bash"),
+    ];
+
+    const compiled = await runner.emitContext(messages);
+
+    expect(((compiled[0] as any)?.content?.[0] as { text: string }).text).toBe(
+      text1
+    );
+    expect(((compiled[1] as any)?.content?.[0] as { text: string }).text).toBe(
+      text2
+    );
+  });
+
+  it("should recall bash results as immutable/stale", async () => {
+    const { result, runner } = await loadExtension();
+
+    const output = "git status output";
+    await runner.emitToolResult(
+      makeBashResult("call-bash", "git status", output)
+    );
+
+    const branch = sessionManager.getBranch();
+    const archiveEntry = branch.find(
+      (e) => e.type === "custom" && e.customType === "results-archive"
+    );
+    expect(archiveEntry).toBeDefined();
+    const { pointerId } = (archiveEntry as any).data;
+
+    const [ext] = result.extensions;
+    if (!ext) {
+      throw new Error("Extension not loaded");
+    }
+    const recallTool = ext.tools.get("recall_result");
+    if (!recallTool) {
+      throw new Error("recall_result tool not registered");
+    }
+
+    const recallResult = await recallTool.definition.execute(
+      "recall-call",
+      { pointer_id: pointerId },
+      new AbortController().signal,
+      () => undefined,
+      runner.createContext()
+    );
+
+    expect((recallResult as { isError?: boolean }).isError).toBeFalsy();
+    expect(
+      (recallResult as { details?: { status?: string } }).details?.status
+    ).toBe("invalidated");
+    const [firstContent] = recallResult.content ?? [];
+    const { text } = firstContent as { text: string };
+    expect(text).toContain("<recalled-stale-content>");
+    expect(text).toContain(output);
+  });
+
+  it("should archive grep tool results", async () => {
+    const { runner } = await loadExtension();
+
+    await runner.emitToolResult(
+      makeGrepResult("call-grep", "foo", "file.ts:1:foo")
+    );
+
+    const branch = sessionManager.getBranch();
+    const archiveEntry = branch.find(
+      (e) => e.type === "custom" && e.customType === "results-archive"
+    );
+    expect(archiveEntry).toBeDefined();
+
+    const arcData = (archiveEntry as any).data;
+    expect(arcData.toolName).toBe("grep");
+    expect(arcData.parameterKey).toBe("foo");
+    expect(arcData.stalenessStrategy).toBe("immutable");
+    expect(arcData.supersessionStrategy).toBe("exact-key");
   });
 });

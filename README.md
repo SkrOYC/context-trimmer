@@ -1,16 +1,24 @@
 # Pi Context Trimmer
 
-A Pi extension that archives large file-read results and replaces them with compact virtual pointers when they become stale, reducing context bloat while preserving the ability to recall original content on demand.
+A Pi extension that archives large tool results and replaces them with compact virtual pointers when they become stale or redundant, reducing context bloat while preserving the ability to recall original content on demand.
 
 ## What It Does
 
-For every `read` tool result, this extension:
+For every supported tool result, this extension:
 
 1. **Archives** the result as a custom `results-archive` entry in the session JSONL
 2. **Computes SHA-256 hashes** for each line that was actually returned
 3. **Leaves the raw result in the current turn** so the model can use it immediately
-4. On later turns, **checks the same file lines on disk**; if any changed, it replaces the archived content in context with a stale pointer
+4. On later turns, replaces archived content in context with a compact pointer when it is **stale or superseded**
 5. Exposes a `recall_result` tool so the model can retrieve archived content later
+
+### Supported tools
+
+- **`read`**: full line-hash staleness checks + line-range supersession (newer reads of the same file can cover older reads)
+- **`bash`**: archived by exact command; newer runs of the same command supersede older ones; treated as immutable/stale on recall
+- **`grep`**: archived by `pattern|path|glob|ignoreCase|literal|context`; newer identical searches supersede older ones; immutable on recall
+- **`find`**: archived by `pattern|path`; newer identical searches supersede older ones; immutable on recall
+- **`ls`**: archived by `path`; newer listings of the same directory supersede older ones; immutable on recall
 
 ## Why
 
@@ -22,9 +30,10 @@ For every `read` tool result, this extension:
 
 ### 1. Tool result interception (`tool_result` event)
 
-For every `read` tool result:
+For every supported tool result:
 
-- The extension determines the actual file content returned:
+- The extension uses a per-tool policy to determine what content to archive and how to identify it.
+- For `read` results it determines the actual file content returned:
   - Prefer `details.truncation.content` when the read tool provides it
   - Otherwise strip the read-tool continuation footer from the raw text (e.g. `[7 more lines in file. Use offset=8 to continue.]`)
   - If `details.truncation.firstLineExceedsLimit` is true, no actual file content was returned, so nothing is archived
@@ -32,19 +41,27 @@ For every `read` tool result:
 - It stores an archive record with:
   - `pointerId`: the virtual pointer ID
   - `toolName`, `toolCallId`: identifying metadata
-  - `parameterKey`: the file path
+  - `parameterKey`: the resolved identifier for the tool invocation (e.g. file path, command string, search query)
+  - `stalenessStrategy`: how staleness is determined (`file-lines` or `immutable`)
+  - `supersessionStrategy`: how newer results can replace older ones (`line-range`, `exact-key`, or `none`)
   - `startLine`: the 1-indexed offset from the read input
   - `lineHashes`: SHA-256 hashes of each returned line
   - `originalContent`: the original tool result content (preserved verbatim for recall)
 
 ### 2. Context compilation (`context` event)
 
-Before each LLM call, the extension scans `toolResult` messages for archived reads:
+Before each LLM call, the extension scans `toolResult` messages for archived results:
 
-- It reads the current file from disk and splits it on `"\n"`
-- For each archived read, it re-hashes the same line range
-- **If unchanged**: the raw content stays in context
-- **If changed or file deleted**: the content is replaced with `[Results Archive: ptr_xxx (Invalidated - Stale)]`
+- It groups archives by tool and parameter key
+- For `read` archives it reads the current file from disk and re-hashes the same line range
+- It computes an eviction score for each archive from:
+  - **Staleness** (line-hash mismatch for `read`, always true for immutable tools)
+  - **Supersession coverage** (line-range for `read`, exact-key for `bash`/`grep`/`find`/`ls`)
+  - **Context pressure** (higher usage → higher score)
+  - **Recency** (recent messages → cheaper KV-cache cost → higher score)
+  - **Co-invalidation boost** (archives after the first replacement in a turn get a bump because the suffix is already being recomputed)
+- **If the score is below the threshold**: the raw content stays in context
+- **If the score crosses the threshold**: the content is replaced with `[Results Archive: ptr_xxx (Invalidated - Stale)]`
 
 ### 3. On-demand recall (`recall_result` tool)
 
@@ -92,7 +109,9 @@ interface ArchivedResult {
   pointerId: string;
   toolName: string;
   toolCallId: string;
-  parameterKey: string;      // absolute file path
+  parameterKey: string;      // resolved identifier (path, command, query, etc.)
+  stalenessStrategy?: "file-lines" | "immutable";
+  supersessionStrategy?: "line-range" | "exact-key" | "none";
   timestamp: number;
   originalContent: string;   // JSON-stringified content array (verbatim tool result)
   startLine: number;         // 1-indexed offset of first returned line
@@ -102,6 +121,6 @@ interface ArchivedResult {
 
 ## Limitations
 
-- Only archives `read` tool results today
 - Only text content is hashed and tracked
 - Footer stripping relies on the read-tool footer formats used by pi today
+- Non-`read` tools are treated as immutable/stale on recall (their output is not re-executed to verify freshness)

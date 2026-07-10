@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ArchivedResult } from "./types";
-import { ARCHIVE_TYPE } from "./types";
+import { ARCHIVE_TYPE, getArchiveGroupKey } from "./types";
 
 export interface ArchiveState {
   activeArchives: Map<string, ArchivedResult>;
@@ -29,12 +29,15 @@ export function createArchiveState(): ArchiveState {
   }
 
   function registerArchive(arc: ArchivedResult) {
-    if (!activeArchives.has(arc.pointerId)) {
-      activeArchives.set(arc.pointerId, arc);
-      const list = archivesByPath.get(arc.parameterKey) ?? [];
-      list.push(arc);
-      archivesByPath.set(arc.parameterKey, list);
+    if (activeArchives.has(arc.pointerId)) {
+      return;
     }
+
+    activeArchives.set(arc.pointerId, arc);
+    const groupKey = getArchiveGroupKey(arc.toolName, arc.parameterKey);
+    const list = archivesByPath.get(groupKey) ?? [];
+    list.push(arc);
+    archivesByPath.set(groupKey, list);
   }
 
   return { activeArchives, archivesByPath, rebuildState, registerArchive };

@@ -64,53 +64,89 @@ export function totalIntervalLength(
   return intervals.reduce((sum, i) => sum + (i.end - i.start + 1), 0);
 }
 
+function isFileBacked(arc: ArchivedResult): boolean {
+  return arc.stalenessStrategy !== "immutable";
+}
+
+function groupFileBackedArchives(archives: ArchivedResult[]): {
+  byPath: Map<string, ArchivedResult[]>;
+  immutable: Map<string, boolean>;
+} {
+  const immutable = new Map<string, boolean>();
+  const byPath = new Map<string, ArchivedResult[]>();
+
+  for (const arc of archives) {
+    if (isFileBacked(arc)) {
+      const list = byPath.get(arc.parameterKey) ?? [];
+      list.push(arc);
+      byPath.set(arc.parameterKey, list);
+    } else {
+      immutable.set(arc.pointerId, true);
+    }
+  }
+
+  return { byPath, immutable };
+}
+
+function checkArchiveAgainstLines(
+  arc: ArchivedResult,
+  diskLines: string[]
+): boolean {
+  const { lineHashes, startLine } = arc;
+
+  for (let i = 0; i < lineHashes.length; i += 1) {
+    const lineIndex = startLine - 1 + i;
+    const diskLine = diskLines[lineIndex];
+    if (diskLine === undefined || getHash(diskLine) !== lineHashes[i]) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function checkPathArchives(
+  paramKey: string,
+  pathArchives: ArchivedResult[],
+  cwd: string,
+  result: Map<string, boolean>
+): void {
+  const filePath = isAbsolute(paramKey) ? paramKey : resolve(cwd, paramKey);
+
+  if (!existsSync(filePath)) {
+    for (const arc of pathArchives) {
+      result.set(arc.pointerId, true);
+    }
+    return;
+  }
+
+  const diskContent = readFileSync(filePath, "utf8");
+  const diskLines = diskContent.split("\n");
+
+  for (const arc of pathArchives) {
+    result.set(arc.pointerId, checkArchiveAgainstLines(arc, diskLines));
+  }
+}
+
 export function checkStalenessBatch(
   archives: ArchivedResult[],
   cwd: string
 ): Map<string, boolean> {
-  const result = new Map<string, boolean>();
-  const byPath = new Map<string, ArchivedResult[]>();
-
-  for (const arc of archives) {
-    const list = byPath.get(arc.parameterKey) ?? [];
-    list.push(arc);
-    byPath.set(arc.parameterKey, list);
-  }
+  const { byPath, immutable } = groupFileBackedArchives(archives);
+  const result = new Map(immutable);
 
   for (const [paramKey, pathArchives] of byPath) {
-    const filePath = isAbsolute(paramKey) ? paramKey : resolve(cwd, paramKey);
-
-    if (!existsSync(filePath)) {
-      for (const arc of pathArchives) {
-        result.set(arc.pointerId, true);
-      }
-      continue;
-    }
-
-    const diskContent = readFileSync(filePath, "utf8");
-    const diskLines = diskContent.split("\n");
-
-    for (const arc of pathArchives) {
-      const { lineHashes, startLine } = arc;
-      let stale = false;
-
-      for (let i = 0; i < lineHashes.length; i += 1) {
-        const lineIndex = startLine - 1 + i;
-        const diskLine = diskLines[lineIndex];
-        if (diskLine === undefined || getHash(diskLine) !== lineHashes[i]) {
-          stale = true;
-          break;
-        }
-      }
-
-      result.set(arc.pointerId, stale);
-    }
+    checkPathArchives(paramKey, pathArchives, cwd, result);
   }
 
   return result;
 }
 
 export function checkStaleness(arc: ArchivedResult, cwd: string): boolean {
+  if (!isFileBacked(arc)) {
+    return true;
+  }
+
   try {
     const filePath = isAbsolute(arc.parameterKey)
       ? arc.parameterKey
