@@ -34,7 +34,15 @@ export async function fetchHuggingFaceRows(
   return data.rows.map((r) => r.row);
 }
 
-export async function fetchGitHubRawFile(url: string): Promise<string> {
+export function fetchGitHubRawFile(url: string): Promise<string> {
+  return fetchRawFile(url);
+}
+
+export function fetchHuggingFaceRawFile(url: string): Promise<string> {
+  return fetchRawFile(url);
+}
+
+async function fetchRawFile(url: string): Promise<string> {
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(

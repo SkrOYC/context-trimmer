@@ -145,9 +145,10 @@ The harness measures:
 - **Real dollar cost** — per-trace input/context spend plus recall output spend
   for each opencode-go SOTA model price card
 
-Because public SWE-agent trajectories peak around ~15k tokens, the default
-200k window mainly exercises supersession; smaller windows act as stress tests
-for pressure-based eviction.
+The default 200k window gives realistic results for the long Toolathlon
+traces; SWE-agent trajectories peak around ~15k tokens, so at 200k they mainly
+exercise supersession, while smaller windows act as stress tests for
+pressure-based eviction.
 
 ## Limitations
 

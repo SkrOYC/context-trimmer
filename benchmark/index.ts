@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { adaptOniTrace } from "./adapter-oni";
 import { adaptSweAgentTrace } from "./adapter-swe-agent";
+import { adaptToolathlonTrace } from "./adapter-toolathlon";
 import { ALGORITHMS } from "./algorithms";
 import { aggregateStats, analyzeTrace, printStats } from "./analyze";
 import { aggregateCosts, computeTraceDollarCost } from "./cost";
@@ -10,6 +11,7 @@ import {
   cacheJsonl,
   cacheText,
   fetchGitHubRawFile,
+  fetchHuggingFaceRawFile,
   fetchHuggingFaceRows,
 } from "./fetch";
 import { fetchOpencodeGoPricing, type ModelPricing } from "./pricing";
@@ -22,13 +24,16 @@ const SWE_AGENT_CONFIG = "default";
 const SWE_AGENT_SPLIT = "train";
 const ONI_JSONL_URL =
   "https://raw.githubusercontent.com/makarsuperstar/oni-devops-traces/main/data/distilled_ssh/data.jsonl";
+const TOOLATHLON_JSONL_URL =
+  "https://huggingface.co/datasets/hkust-nlp/Toolathlon-Trajectories/resolve/main/claude-4.5-opus_1.jsonl";
 
 interface BenchmarkOptions {
   cacheDir: string;
   contextWindows: number[];
   maxOniTraces: number;
   maxSweTraces: number;
-  sources: Set<"swe-agent" | "oni-devops">;
+  maxToolathlonTraces: number;
+  sources: Set<"swe-agent" | "oni-devops" | "toolathlon">;
 }
 
 function parseArgs(): BenchmarkOptions {
@@ -41,9 +46,13 @@ function parseArgs(): BenchmarkOptions {
   if (args.includes("--oni-devops")) {
     sources.add("oni-devops");
   }
+  if (args.includes("--toolathlon")) {
+    sources.add("toolathlon");
+  }
   if (sources.size === 0) {
     sources.add("swe-agent");
     sources.add("oni-devops");
+    sources.add("toolathlon");
   }
 
   const cacheDir = getArg(args, "--cache-dir") ?? DEFAULT_CACHE_DIR;
@@ -53,12 +62,14 @@ function parseArgs(): BenchmarkOptions {
     : [200_000];
   const maxSweTraces = Number(getArg(args, "--max-swe") ?? "50");
   const maxOniTraces = Number(getArg(args, "--max-oni") ?? "100");
+  const maxToolathlonTraces = Number(getArg(args, "--max-toolathlon") ?? "20");
 
   return {
     cacheDir,
     contextWindows,
     maxOniTraces,
     maxSweTraces,
+    maxToolathlonTraces,
     sources,
   };
 }
@@ -154,6 +165,44 @@ async function loadOniTraces(
   return traces;
 }
 
+async function loadToolathlonTraces(
+  cacheDir: string,
+  maxTraces: number
+): Promise<ParsedTrace[]> {
+  const cachePath = join(cacheDir, "toolathlon-trajectories", "data.jsonl");
+
+  if (!existsSync(cachePath)) {
+    console.log("Fetching Toolathlon trajectories (claude-4.5-opus_1)...");
+    const text = await fetchHuggingFaceRawFile(TOOLATHLON_JSONL_URL);
+    cacheText(cacheDir, "toolathlon-trajectories", "data.jsonl", text);
+  }
+
+  const lines = readFileSync(cachePath, "utf8")
+    .split("\n")
+    .filter((line) => line.trim().length > 0);
+
+  // Toolathlon tasks vary wildly in length. Sort by total message characters
+  // so we benchmark the longest, most context-heavy trajectories first.
+  const withLength = lines.map((line) => {
+    const record = JSON.parse(line) as Record<string, unknown>;
+    const messagesStr =
+      typeof record.messages === "string" ? record.messages : "";
+    return { line, messagesLength: messagesStr.length };
+  });
+  withLength.sort((a, b) => b.messagesLength - a.messagesLength);
+
+  const traces: ParsedTrace[] = [];
+  for (const { line } of withLength.slice(0, maxTraces)) {
+    const record = JSON.parse(line) as unknown;
+    const trace = adaptToolathlonTrace(record);
+    if (trace) {
+      traces.push(trace);
+    }
+  }
+
+  return traces;
+}
+
 function runBenchmarks(
   traces: ParsedTrace[],
   source: string,
@@ -190,9 +239,10 @@ function runBenchmarks(
 
 function printComparison(
   source: string,
-  resultsByAlgorithm: Map<string, TraceResult[]>
+  resultsByAlgorithm: Map<string, TraceResult[]>,
+  label?: string
 ): void {
-  console.log(`\n=== Metrics comparison for ${source} ===`);
+  console.log(`\n=== Metrics comparison for ${label ?? source} ===`);
   console.log(
     [
       "Algorithm".padEnd(24),
@@ -338,8 +388,9 @@ async function main(): Promise<void> {
         allResults.set(`${key}:${contextWindow}`, value);
       }
       printComparison(
-        `swe-agent @ ${contextWindow.toLocaleString()}`,
-        sweResults
+        "swe-agent",
+        sweResults,
+        `swe-agent @ ${contextWindow.toLocaleString()}`
       );
       printCostComparison("swe-agent", sweResults, pricing);
     }
@@ -365,10 +416,43 @@ async function main(): Promise<void> {
         allResults.set(`${key}:${contextWindow}`, value);
       }
       printComparison(
-        `oni-devops @ ${contextWindow.toLocaleString()}`,
-        oniResults
+        "oni-devops",
+        oniResults,
+        `oni-devops @ ${contextWindow.toLocaleString()}`
       );
       printCostComparison("oni-devops", oniResults, pricing);
+    }
+  }
+
+  if (options.sources.has("toolathlon")) {
+    console.log("\n--- Loading Toolathlon trajectories ---");
+    const toolathlonTraces = await loadToolathlonTraces(
+      options.cacheDir,
+      options.maxToolathlonTraces
+    );
+    console.log(`Loaded ${toolathlonTraces.length} Toolathlon traces`);
+
+    const stats = toolathlonTraces.map(analyzeTrace);
+    printStats(aggregateStats(stats));
+
+    for (const contextWindow of options.contextWindows) {
+      console.log(
+        `\n--- Context window: ${contextWindow.toLocaleString()} ---`
+      );
+      const toolathlonResults = runBenchmarks(
+        toolathlonTraces,
+        "toolathlon",
+        contextWindow
+      );
+      for (const [key, value] of toolathlonResults.entries()) {
+        allResults.set(`${key}:${contextWindow}`, value);
+      }
+      printComparison(
+        "toolathlon",
+        toolathlonResults,
+        `toolathlon @ ${contextWindow.toLocaleString()}`
+      );
+      printCostComparison("toolathlon", toolathlonResults, pricing);
     }
   }
 

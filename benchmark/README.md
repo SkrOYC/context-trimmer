@@ -9,6 +9,10 @@ from [models.dev](https://models.dev) (opencode-go provider).
 - `nebius/SWE-agent-trajectories` (Hugging Face): ~80k real SWE-agent
   trajectories. Long contexts, realistic command mix. The harness samples a
   configurable subset and caches it locally.
+- `hkust-nlp/Toolathlon-Trajectories` (Hugging Face): long-horizon agent
+  traces from Claude 4.5 Opus runs. These are the longest public traces
+  available — some exceed 2M characters (~500k+ tokens) — so they are the
+  best source for realistic 200k context-window pressure testing.
 - `makarsuperstar/oni-devops-traces` (GitHub): short, clean JSONL traces with
   explicit `bash`, `read_file`, and `list_dir` tool calls.
 
@@ -71,19 +75,17 @@ For every turn of every trace we replay:
 ## A note on context-window size
 
 The default context window is **200,000 tokens**, which matches modern SOTA
-coding models. However, the public SWE-agent trajectories in this benchmark
-peak at roughly **15k tokens** (≈32% of 200k), and the oni-devops traces are
-much shorter. At 200k the pressure-based algorithms (`current-70`,
-`oldest-first-30`) rarely trigger, so most observed savings come from
-supersession.
+coding models.
 
-Smaller windows (32k–128k) are therefore useful as **stress tests**: they
-simulate what would happen if the same trace pattern continued until it hit
-pressure. The `--context-window` flag accepts a comma-separated list so you
-can sweep and see the transition from "no pressure" to "heavy pressure".
+- **Toolathlon** traces are genuinely long (some >500k tokens), so at 200k
+they hit heavy pressure and the pressure-based algorithms (`current-70`,
+`oldest-first-30`) fire strongly.
+- **SWE-agent** trajectories peak at roughly **15k tokens** (≈32% of 200k), so
+at 200k they mainly exercise supersession.
+- **oni-devops** traces are short and rarely hit pressure at any window.
 
-Longer public coding-agent traces would be needed for a fully realistic 200k
-pressure evaluation.
+The `--context-window` flag accepts a comma-separated list so you can sweep
+and see the transition from "no pressure" to "heavy pressure".
 
 ## Output
 
