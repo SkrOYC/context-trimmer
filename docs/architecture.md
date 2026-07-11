@@ -122,15 +122,20 @@ sequenceDiagram
 
 Before sending the conversation history to the LLM for the next turn:
 1.  Pi Core triggers context compilation, emitting the `"context"` event with the current `AgentMessage[]` array.
-2.  The extension's handler checks all historical archived tool results.
-3.  It computes an eviction score for each archive from:
-    *   **Staleness**: for `read` archives, line-hash mismatch against the current file; for immutable tools, always stale.
-    *   **Supersession coverage**: newer archives of the same tool/parameter group (`line-range` for `read`, `exact-key` for `bash`/`grep`/`find`/`ls`).
-    *   **Context pressure**: higher usage increases the score once it crosses the soft threshold.
-    *   **Recency**: recent messages score higher because replacing them invalidates a shorter KV-cache suffix; older content is more expensive to drop.
-    *   **Co-invalidation boost**: archives located after the first replacement in a turn get a bonus because that suffix is already being recomputed, so evicting them is essentially free KV-cache-wise.
-4.  If the score crosses the active threshold, the raw text is replaced in-memory with `[Results Archive: pointer_id (Invalidated - Stale)]`.
-5.  The modified message array is compiled and sent to the LLM.
+2.  The extension's handler checks all historical archived tool results and computes a normalized **eviction score** in `[0, 1]` for each — a weighted sum where each weight is that signal's *share* of the total (weights sum to 1):
+    *   **Supersession**: newer archives of the same tool/parameter group (`line-range` for `read`, `exact-key` for `bash`/`grep`/`find`/`ls`).
+    *   **Staleness** (confidence-weighted): a `read` whose file changed on disk is *proven* stale; immutable tools can only be *assumed* stale, so their signal is discounted.
+    *   **Pressure**: rises as the compiled context crosses a percent / absolute-token knee; shared by every candidate that turn.
+    *   **Coldness** and **Size**: older, larger archives are more disposable.
+    *   **Semantic**: per-tool disposability (reads are the most valuable to keep).
+    *   **Affordability**: the KV-cache counterweight — content whose removal invalidates a long suffix scores lower. Its **co-location bump** sets affordability to 1 for archives already inside a suffix being invalidated anyway.
+3.  **Proven-dead content evicts freely** (full supersession or proven-stale read), independent of pressure. **Still-valid content is capped**: only eligible once there is genuine pressure *and* its score clears the threshold.
+4.  **The most recently archived tool result is always protected** so a fresh result is usable verbatim on the turn it is produced.
+5.  **Batching**: eligible removals are held until they would free at least `minBatchTokens` (or the overflow guard trips), so eviction is a few large, amortized KV-cache invalidations rather than a trickle. Eviction is **append-only** — a pointer that replaces a result stays.
+6.  For each evicted archive the raw text is replaced in-memory with `[Results Archive: pointer_id (Invalidated - Stale)]`.
+7.  The modified message array is compiled and sent to the LLM.
+
+> The aggressiveness knobs (threshold, pressure knees, batch size) are set by principle; the signal weights and per-tool semantics are tuned by `benchmark/optimize.ts`. The scoring in `src/eviction.ts` runs identically in production and under test — there is no test-only reparameterization.
 
 ```mermaid
 sequenceDiagram
@@ -143,7 +148,7 @@ sequenceDiagram
     PiCore->>Ext: Emit "context" (messages array)
     loop For each archived toolResult in history
         Ext->>Disk: Verify line hashes for read archives
-        Ext->>Ext: Compute eviction score (staleness + supersession + pressure + recency)
+        Ext->>Ext: Compute eviction score (supersession + staleness + pressure + coldness + size + semantic + affordability)
         alt Score crosses threshold
             Ext->>Ext: Replace raw text with pointer: [Results Archive: ptr_xxx (Invalidated - Stale)]
         else Active

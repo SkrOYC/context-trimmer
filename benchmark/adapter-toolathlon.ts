@@ -24,6 +24,10 @@ type SupportedToolName = "bash" | "find" | "grep" | "ls" | "read";
 
 interface ParsedToolathlonCall {
   args: Record<string, unknown>;
+  // Absolute/relative file path this call mutates on disk, if any. Used by the
+  // benchmark to synthesize staleness: a later write to a path invalidates
+  // earlier reads of it.
+  mutatesPath?: string;
   observation: string;
   toolName: SupportedToolName;
 }
@@ -148,6 +152,13 @@ const TOOL_PARSER_BY_NAME: Record<string, ToolArgsParser> = {
   python_execute: parsePythonExecuteArgs,
 };
 
+// Tool names that mutate a file at rawArgs.path. A later call to one of these
+// makes any earlier read of the same path stale.
+const FILE_WRITE_TOOLS = new Set([
+  "filesystem-edit_file",
+  "filesystem-write_file",
+]);
+
 function parseFunctionCall(
   name: string,
   rawArgs: Record<string, unknown>
@@ -156,8 +167,14 @@ function parseFunctionCall(
     TOOL_PARSER_BY_NAME[name] ?? (() => parseGenericToolArgs(name, rawArgs));
   const result = parser(rawArgs);
 
+  const mutatesPath =
+    FILE_WRITE_TOOLS.has(name) && typeof rawArgs.path === "string"
+      ? rawArgs.path
+      : undefined;
+
   return {
     args: result.args,
+    mutatesPath,
     observation: "",
     toolName: result.toolName,
   };
@@ -230,6 +247,7 @@ function processToolMessage(
   return {
     turns: [
       {
+        mutatesPath: parsed.mutatesPath,
         observation,
         toolResult: makeToolResultEvent(toolCallId, parsed),
       },

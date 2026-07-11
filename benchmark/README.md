@@ -1,20 +1,17 @@
 # Context Trimmer Benchmark
 
-Stress-tests the `pi-context-trimmer` eviction algorithm against public agent
-trajectories and compares its cost against simple baselines using real prices
+Stress-tests the `pi-context-trimmer` eviction algorithm against long public
+agent trajectories and compares it against simple baselines using real prices
 from [models.dev](https://models.dev) (opencode-go provider).
 
-## Data sources (public only)
+## Data source (public only)
 
-- `nebius/SWE-agent-trajectories` (Hugging Face): ~80k real SWE-agent
-  trajectories. Long contexts, realistic command mix. The harness samples a
-  configurable subset and caches it locally.
-- `hkust-nlp/Toolathlon-Trajectories` (Hugging Face): long-horizon agent
-  traces from Claude 4.5 Opus runs. These are the longest public traces
-  available — some exceed 2M characters (~500k+ tokens) — so they are the
-  best source for realistic 200k context-window pressure testing.
-- `makarsuperstar/oni-devops-traces` (GitHub): short, clean JSONL traces with
-  explicit `bash`, `read_file`, and `list_dir` tool calls.
+- `hkust-nlp/Toolathlon-Trajectories` (Hugging Face): long-horizon agent traces
+  from Claude 4.5 Opus runs. These are the only public traces long enough — some
+  exceed 2M characters (~500k+ tokens) — to actually cross a 200k context window
+  and exercise the eviction logic. Shorter datasets (SWE-agent ~32% peak,
+  oni-devops ~1%) never approach the window, so they were dropped: replaying them
+  only confirms the trimmer correctly does nothing.
 
 Traces are cached under `.benchmark-cache/` after the first run.
 
@@ -22,72 +19,73 @@ Traces are cached under `.benchmark-cache/` after the first run.
 
 ```bash
 bun run benchmark
-```
-
-Options:
-
-```bash
-# Default: 200k context window (realistic for modern SOTA models)
-bun run benchmark
-
-# Stress-test at smaller windows to see pressure-based eviction
-bun run benchmark -- --context-window 32000
-
-# Sweep multiple windows
 bun run benchmark -- --context-window 32000,64000,128000,200000
-
-# Tune samples
-bun run benchmark -- --max-swe 100 --max-oni 100
-bun run benchmark -- --swe-agent
-bun run benchmark -- --oni-devops
+bun run benchmark -- --max-toolathlon 20 --recall-rate 0.02
 ```
 
-## Cost model
+## What the benchmark can and cannot measure
 
-For every turn of every trace we replay:
+For every turn of every trace we archive the tool result, build the compiled
+message list, run the eviction algorithm (`production` calls the exact
+`selectEvictionCandidates` from `src/eviction.ts`), and measure:
 
-1. Archive the tool result using the same policies as the extension.
-2. Build the compiled message list up to that turn.
-3. Run the chosen replacement algorithm.
-4. Measure:
-   - **Compression ratio** — replaced archive chars / total archive chars.
-   - **KV-cache invalidation cost** — messages from the first replacement to
-     the end of context. Lower is better because fewer prefix tokens are
-     recomputed.
-   - **Recall cost** — number of archives replaced. Each one may require a
-     `recall_result` call later.
-   - **Real dollar cost** — context/input tokens are priced at the model's
-     `input` rate for every turn; each replaced archive is assumed to be
-     recalled once, paying the `input` rate for the recall tool call and the
-     `output` rate for the returned original content. Prices come from
-     `https://models.dev/api.json` filtered to the `opencode-go` provider.
+- **Mean context usage** — average compiled context as a share of the window.
+  Lower is better (the "dumb zone": large contexts degrade model quality).
+- **Window overflow tokens** — a **hard constraint**. Tokens over the window
+  force compaction or a request failure in a live agent, so any config that
+  overflows is infeasible regardless of its other numbers.
+- **Invalidation events** — turns on which a *new* mid-context replacement
+  rewrote the KV-cache suffix. This is the anti-thrash metric: the batched design
+  frees many archives across few events; a naive per-turn policy re-invalidates
+  constantly.
+- **Real dollar cost** — cache-aware: each turn's cache-read and cache-write
+  tokens (a mid-context edit makes the whole suffix a cache-write) plus a
+  **parameterized** recall estimate (`--recall-rate`, default ~0.02, since the
+  pointer is a rarely-used safety net, not an expected access).
+
+**The honest ceiling:** these traces were generated *without* trimming, so the
+agent never had to re-fetch anything — every observation stayed in context the
+whole run. The re-reads our trimming *would* force are therefore invisible, and a
+pure "minimize context" objective would collapse the context to near-empty. Local
+or private traces have the identical problem (also generated without our
+trimmer). So the benchmark honestly measures overflow, thrash, and context size —
+but **not** the cost of over-trimming.
+
+## Consequences encoded in the design
+
+- **Aggressiveness is set by principle, not fit to the benchmark.** Provably-dead
+  content (fully superseded / proven-stale reads) evicts freely; still-valid
+  content is only trimmed under genuine pressure. See `DEFAULT_EVICTION_CONFIG`.
+- **Staleness is synthesized from the trace.** A `read` is marked stale only when
+  a later `filesystem-write_file`/`edit_file` touches the same path — so the
+  staleness signal actually varies, instead of the degenerate "everything is
+  stale" you get from re-hashing files that don't exist in a temp dir.
+- **A re-reference (premature-recall) penalty** charges the objective when we
+  evict a read whose file the trace's own agent reads again later — a partial,
+  data-driven proxy for information loss.
 
 ## Algorithms compared
 
 - `no-replacement`: keep every raw tool result (baseline).
-- `oldest-first-30`: replace oldest archives until 30% of archive chars are
-  freed (naive baseline).
-- `supersession-only`: only replace when staleness or supersession signals are
-  strong; ignore pressure.
-- `current-70`: the trimmer's composite score (staleness + supersession +
-  pressure + recency + co-invalidation boost) with the default thresholds.
+- `oldest-first-30`: replace oldest archives until 30% of archive chars are freed.
+- `optimized-cache-aware`: a marginal-cost model kept for comparison. It looks
+  cheap on dollars only because it trims aggressively — but it **overflows the
+  window** and thrashes the cache, i.e. it optimizes dollars by abandoning the
+  actual goal.
+- `production`: the shipped policy from `src/eviction.ts`.
 
-## A note on context-window size
+## `optimize.ts`
 
-The default context window is **200,000 tokens**, which matches modern SOTA
-coding models.
-
-- **Toolathlon** traces are genuinely long (some >500k tokens), so at 200k
-they hit heavy pressure and the pressure-based algorithms (`current-70`,
-`oldest-first-30`) fire strongly.
-- **SWE-agent** trajectories peak at roughly **15k tokens** (≈32% of 200k), so
-at 200k they mainly exercise supersession.
-- **oni-devops** traces are short and rarely hit pressure at any window.
-
-The `--context-window` flag accepts a comma-separated list so you can sweep
-and see the transition from "no pressure" to "heavy pressure".
+`bun run benchmark/optimize.ts` runs coordinate descent over the *honestly
+learnable* parameters (the signal weight shares, per-tool semantics) with
+aggressiveness fixed by principle, on a deterministic train/holdout split. It
+minimizes mean context usage + a cache-miss term + a recall term, with overflow
+as a hard constraint. It ends with an **overfitting guard**: it only recommends
+the learned weights if they beat the principled defaults out-of-sample — which,
+with the over-trim exploit closed, they do not. The value is in the structure,
+not fitted weights.
 
 ## Output
 
-A metrics table and a dollar-cost table are printed per source and context
-window. A JSON report is written to `.benchmark-cache/benchmark-report.json`.
+A metrics table and a dollar-cost table are printed per context window. A JSON
+report is written to `.benchmark-cache/benchmark-report.json`.

@@ -130,6 +130,97 @@ export interface ReplayOptions {
   selector: CandidateSelector;
 }
 
+interface TraceFileHistory {
+  // path -> sorted turn indices where a write/edit mutated it.
+  mutationTurns: Map<string, number[]>;
+  // path -> sorted turn indices where a read observed it.
+  readTurns: Map<string, number[]>;
+}
+
+function buildFileHistory(trace: ParsedTrace): TraceFileHistory {
+  const mutationTurns = new Map<string, number[]>();
+  const readTurns = new Map<string, number[]>();
+
+  trace.turns.forEach((turn, i) => {
+    if (turn.mutatesPath) {
+      const list = mutationTurns.get(turn.mutatesPath) ?? [];
+      list.push(i);
+      mutationTurns.set(turn.mutatesPath, list);
+    }
+    const { toolName, input } = turn.toolResult;
+    if (toolName === "read" && typeof input.path === "string") {
+      const list = readTurns.get(input.path) ?? [];
+      list.push(i);
+      readTurns.set(input.path, list);
+    }
+  });
+
+  return { mutationTurns, readTurns };
+}
+
+function hasEventInRange(
+  turns: number[] | undefined,
+  afterExclusive: number,
+  untilInclusive: number
+): boolean {
+  if (!turns) {
+    return false;
+  }
+  return turns.some((t) => t > afterExclusive && t <= untilInclusive);
+}
+
+// Synthesized staleness for the current turn: a read archive is stale if its
+// file was written/edited after the read and at or before now; immutable-tool
+// archives are "assumed stale" exactly as production treats them.
+function buildStalenessOverride(
+  activeArchives: Map<string, ArchivedResult>,
+  pathByPointer: Map<string, string>,
+  creationTurnByPointer: Map<string, number>,
+  mutationTurns: Map<string, number[]>,
+  turnIndex: number
+): Map<string, boolean> {
+  const override = new Map<string, boolean>();
+  for (const arc of activeArchives.values()) {
+    const path = pathByPointer.get(arc.pointerId);
+    if (path === undefined) {
+      override.set(arc.pointerId, true);
+      continue;
+    }
+    const createdAt = creationTurnByPointer.get(arc.pointerId) ?? -1;
+    override.set(
+      arc.pointerId,
+      hasEventInRange(mutationTurns.get(path), createdAt, turnIndex)
+    );
+  }
+  return override;
+}
+
+// Premature recalls: we evicted a read archive, then the trace's own agent read
+// that same file again later — evidence the content still had value.
+function countPrematureRecalls(
+  evictionTurnByPointer: Map<string, number>,
+  pathByPointer: Map<string, string>,
+  readTurns: Map<string, number[]>
+): number {
+  let count = 0;
+  for (const [pointerId, evictionTurn] of evictionTurnByPointer) {
+    const path = pathByPointer.get(pointerId);
+    if (path === undefined) {
+      continue;
+    }
+    if (
+      hasEventInRange(
+        readTurns.get(path),
+        evictionTurn,
+        Number.POSITIVE_INFINITY
+      )
+    ) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
 export function replayTrace(
   trace: ParsedTrace,
   options: ReplayOptions
@@ -137,13 +228,23 @@ export function replayTrace(
   const { contextWindow, cwd, selector } = options;
   const state = createArchiveState();
   const ctx = createMockExtensionContext(cwd);
+  const fileHistory = buildFileHistory(trace);
 
   const turnResults: TurnResult[] = [];
   const alreadyReplaced = new Set<string>();
+  // Per-archive bookkeeping for synthesized staleness and the re-reference
+  // (premature-recall) penalty.
+  const creationTurnByPointer = new Map<string, number>();
+  const pathByPointer = new Map<string, string>();
+  const evictionTurnByPointer = new Map<string, number>();
   let previousCompiledMessages: AgentMessage[] | undefined;
   let totalArchiveChars = 0;
   let totalReplacedChars = 0;
   let maxContextUsagePercent = 0;
+  let maxCompiledUsagePercent = 0;
+  let overflowTokensBaseline = 0;
+  let overflowTokensCompiled = 0;
+  let invalidationEvents = 0;
 
   for (let turnIndex = 0; turnIndex < trace.turns.length; turnIndex += 1) {
     const turn = trace.turns[turnIndex];
@@ -154,6 +255,13 @@ export function replayTrace(
     const archiveRecord = archiveToolResult(state, turn.toolResult, ctx);
     if (archiveRecord) {
       totalArchiveChars += archiveRecord.originalContent.length;
+      creationTurnByPointer.set(archiveRecord.pointerId, turnIndex);
+      if (
+        archiveRecord.stalenessStrategy !== "immutable" &&
+        typeof turn.toolResult.input.path === "string"
+      ) {
+        pathByPointer.set(archiveRecord.pointerId, turn.toolResult.input.path);
+      }
     }
 
     const messages = buildMessages(trace, turnIndex);
@@ -173,12 +281,22 @@ export function replayTrace(
       tokens: Math.floor(totalChars / 4),
     };
 
+    const stalenessOverride = buildStalenessOverride(
+      state.activeArchives,
+      pathByPointer,
+      creationTurnByPointer,
+      fileHistory.mutationTurns,
+      turnIndex
+    );
+
     const toReplace = selector(
       messages,
       state.archivesByPath,
       state.activeArchives,
       usage,
-      cwd
+      cwd,
+      alreadyReplaced,
+      stalenessOverride
     );
 
     const newlyReplaced = new Set<string>();
@@ -186,7 +304,18 @@ export function replayTrace(
       if (!alreadyReplaced.has(pointerId)) {
         newlyReplaced.add(pointerId);
         alreadyReplaced.add(pointerId);
+        evictionTurnByPointer.set(pointerId, turnIndex);
       }
+    }
+
+    // Any turn that introduces a new replacement rewrites the KV-cache suffix
+    // from the oldest replaced message onward. Counting these turns (not the
+    // number of archives replaced) is the anti-thrash signal: the decisive
+    // batch model frees many archives across few events; the incremental model
+    // dribbles replacements across many events, paying the invalidation each
+    // time.
+    if (newlyReplaced.size > 0) {
+      invalidationEvents += 1;
     }
 
     const compiledMessages = applyReplacements(
@@ -215,6 +344,16 @@ export function replayTrace(
     const compiledTokens = compiledMessages.reduce(
       (sum, msg) => sum + Math.ceil(messageText(msg).length / 4),
       0
+    );
+
+    // Track how close to (or past) the window each strategy runs. Tokens over
+    // the window are the real cost the trimmer exists to avoid: in a live agent
+    // they force compaction or an outright request failure.
+    overflowTokensBaseline += Math.max(0, baselineTokens - contextWindow);
+    overflowTokensCompiled += Math.max(0, compiledTokens - contextWindow);
+    maxCompiledUsagePercent = Math.max(
+      maxCompiledUsagePercent,
+      Math.floor((compiledTokens / contextWindow) * 100)
     );
 
     const firstChangedIndex = findFirstChangedIndex(
@@ -248,9 +387,20 @@ export function replayTrace(
     });
   }
 
+  const prematureRecalls = countPrematureRecalls(
+    evictionTurnByPointer,
+    pathByPointer,
+    fileHistory.readTurns
+  );
+
   return {
+    invalidationEvents,
+    maxCompiledUsagePercent,
     maxContextUsagePercent,
     metadata: trace.metadata,
+    overflowTokensBaseline,
+    overflowTokensCompiled,
+    prematureRecalls,
     replacedCount: alreadyReplaced.size,
     source: trace.source,
     totalArchiveChars,

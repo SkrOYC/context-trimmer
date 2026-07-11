@@ -1,27 +1,48 @@
 import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ContextUsage } from "../src/eviction";
-import { computeArchiveMetrics } from "../src/supersession";
-import { checkStalenessBatch } from "../src/utils";
+import {
+  DEFAULT_EVICTION_CONFIG,
+  type EvictionConfig,
+  type EvictionWeights,
+} from "../src/eviction";
 import { adaptToolathlonTrace } from "./adapter-toolathlon";
-import type { CandidateSelector } from "./algorithms";
-import { computeTraceDollarCost } from "./cost";
-import { fetchModelPricing, type ModelPricing } from "./pricing";
+import { makeProduction } from "./algorithms";
 import { replayTrace } from "./replay";
-import type { ArchivedResult, ParsedTrace } from "./types";
+import type { ParsedTrace } from "./types";
 
 const CACHE_DIR = join(process.cwd(), ".benchmark-cache");
+const CONTEXT_WINDOW = 200_000;
+const HOLDOUT_STRIDE = 3;
 
-interface Params {
-  coInvalidationBoost: number;
-  pressureWeight: number;
-  recencyWeight: number;
-  softPressureThreshold: number;
-  stalenessWeight: number;
-  supersessionWeight: number;
-}
+// Objective = mean compiled context usage (the dumb-zone cost we minimize)
+//           + LAMBDA * invalidation rate      (KV-cache-miss counter-term)
+//           + MU     * premature-recall rate  (info-loss counter-term)
+// Overflow is a hard constraint: any config that overflows the window is
+// infeasible (objective = Infinity) because those turns force compaction or a
+// request failure in a live agent. LAMBDA prices a cache-miss event; MU prices
+// evicting content the trace's agent later came back to. Without MU the search
+// collapses the context to near-empty, since losing information is otherwise
+// free. Both are per-turn-normalized so the terms are comparable.
+const LAMBDA = 0.4;
+const MU = 0.6;
+
+const SEMANTIC_TOOLS = ["read", "bash", "grep", "find", "ls"] as const;
+const WEIGHT_KEYS: (keyof EvictionWeights)[] = [
+  "affordability",
+  "coldness",
+  "pressure",
+  "semantic",
+  "size",
+  "staleness",
+  "supersession",
+];
+
+const GRID = {
+  immutableStalenessConfidence: [0.2, 0.4, 0.6, 0.8, 1.0],
+  semantic: [0.2, 0.35, 0.5, 0.65, 0.8],
+  weight: [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4],
+};
 
 function loadToolathlonTraces(): ParsedTrace[] {
   const cachePath = join(CACHE_DIR, "toolathlon-trajectories", "data.jsonl");
@@ -53,262 +74,249 @@ function loadToolathlonTraces(): ParsedTrace[] {
   return traces;
 }
 
-function computePressureScore(percent: number, params: Params): number {
-  if (percent <= params.softPressureThreshold) {
-    return 0;
-  }
-  const range = 100 - params.softPressureThreshold;
-  const progress = Math.min(
-    (percent - params.softPressureThreshold) / range,
-    1
-  );
-  return progress * params.pressureWeight;
+interface Evaluation {
+  invalidationRate: number;
+  meanUsage: number;
+  objective: number;
+  overflow: number;
+  prematureRecallRate: number;
 }
 
-function computeEvictionScore(
-  m: { index: number; pointerId: string; coverage: number; threshold: number },
-  isStale: boolean,
-  totalMessages: number,
-  pressureScore: number,
-  firstReplacementIndex: number,
-  params: Params
-): number {
-  const recencyRatio = m.index / (totalMessages - 1 || 1);
-
-  let score = 0;
-  if (isStale) {
-    score += params.stalenessWeight;
-  }
-  score += Math.min(m.coverage / m.threshold, 1.0) * params.supersessionWeight;
-  score += pressureScore;
-  score += recencyRatio * params.recencyWeight;
-
-  const hasEvictionSignal = isStale || m.coverage > 0;
-  if (m.index >= firstReplacementIndex && hasEvictionSignal) {
-    score += params.coInvalidationBoost;
-  }
-
-  return score;
-}
-
-function makeEvictionSelector(params: Params): CandidateSelector {
-  return (
-    messages: AgentMessage[],
-    archivesByPath: Map<string, ArchivedResult[]>,
-    activeArchives: Map<string, ArchivedResult>,
-    usage: ContextUsage,
-    cwd: string
-  ): Set<string> => {
-    const toReplace = new Set<string>();
-    const percent = usage.percent ?? 0;
-
-    if (percent < params.softPressureThreshold) {
-      return toReplace;
-    }
-
-    const metrics = computeArchiveMetrics(messages, archivesByPath).sort(
-      (a, b) => a.index - b.index
-    );
-    if (metrics.length === 0) {
-      return toReplace;
-    }
-
-    const candidateArchives = metrics
-      .map((m) => activeArchives.get(m.pointerId))
-      .filter((arc): arc is ArchivedResult => arc !== undefined);
-
-    const staleByPointer = checkStalenessBatch(candidateArchives, cwd);
-    const totalMessages = messages.length;
-    const pressureScore = computePressureScore(percent, params);
-    const scoreThreshold = 1.0; // Locked constant threshold
-
-    let firstReplacementIndex = Number.POSITIVE_INFINITY;
-
-    for (const m of metrics) {
-      const arc = activeArchives.get(m.pointerId);
-      if (!arc) {
-        continue;
-      }
-
-      const isStale = staleByPointer.get(m.pointerId) ?? false;
-      const score = computeEvictionScore(
-        m,
-        isStale,
-        totalMessages,
-        pressureScore,
-        firstReplacementIndex,
-        params
-      );
-
-      if (score >= scoreThreshold) {
-        toReplace.add(m.pointerId);
-        firstReplacementIndex = Math.min(firstReplacementIndex, m.index);
-      }
-    }
-
-    return toReplace;
-  };
-}
-
-function evaluateConfig(
-  params: Params,
-  traces: ParsedTrace[],
-  pricing: ModelPricing,
-  cwd: string
-): number {
-  const selector = makeEvictionSelector(params);
-  let totalTrimmerCost = 0;
-  let totalBaselineCost = 0;
+function evaluate(config: EvictionConfig, traces: ParsedTrace[]): Evaluation {
+  const selector = makeProduction(config);
+  let overflow = 0;
+  let usageSum = 0;
+  let turnCount = 0;
+  let invalidationEvents = 0;
+  let prematureRecalls = 0;
 
   for (const trace of traces) {
     const result = replayTrace(trace, {
-      contextWindow: 200_000,
-      cwd,
+      contextWindow: CONTEXT_WINDOW,
+      cwd: tmpdir(),
       selector,
     });
-
-    const cost = computeTraceDollarCost(result, pricing);
-    const trimmerCostWithoutRecall = cost.trimmerCost - cost.recallCost;
-    const scaledRecallCost = cost.recallCost * 0.2;
-    const totalScaledCost = trimmerCostWithoutRecall + scaledRecallCost;
-
-    totalTrimmerCost += totalScaledCost;
-    totalBaselineCost += cost.baselineCost;
+    overflow += result.overflowTokensCompiled;
+    invalidationEvents += result.invalidationEvents;
+    prematureRecalls += result.prematureRecalls;
+    for (const turn of result.turnResults) {
+      usageSum += turn.compiledTokens / CONTEXT_WINDOW;
+      turnCount += 1;
+    }
   }
 
-  return totalBaselineCost - totalTrimmerCost;
-}
+  const meanUsage = turnCount === 0 ? 0 : usageSum / turnCount;
+  const invalidationRate = turnCount === 0 ? 0 : invalidationEvents / turnCount;
+  const prematureRecallRate =
+    turnCount === 0 ? 0 : prematureRecalls / turnCount;
+  const objective =
+    overflow > 0
+      ? Number.POSITIVE_INFINITY
+      : meanUsage + LAMBDA * invalidationRate + MU * prematureRecallRate;
 
-function getRandomVal(min: number, max: number): number {
-  return Math.random() * (max - min) + min;
-}
-
-function generateRandomParams(): Params {
-  const soft = Math.floor(getRandomVal(10, 90));
   return {
-    coInvalidationBoost: getRandomVal(0, 1.0),
-    pressureWeight: getRandomVal(0, 1.0),
-    recencyWeight: getRandomVal(0, 1.0),
-    softPressureThreshold: soft,
-    stalenessWeight: getRandomVal(0, 1.0),
-    supersessionWeight: getRandomVal(0, 1.0),
+    invalidationRate,
+    meanUsage,
+    objective,
+    overflow,
+    prematureRecallRate,
   };
 }
 
-function cloneParams(p: Params): Params {
-  return { ...p };
+/** Set one weight to `value` and renormalize the rest so the shares sum to 1. */
+function withWeight(
+  config: EvictionConfig,
+  key: keyof EvictionWeights,
+  value: number
+): EvictionConfig {
+  const others = WEIGHT_KEYS.filter((k) => k !== key);
+  const otherSum = others.reduce((s, k) => s + config.weights[k], 0);
+  const remaining = 1 - value;
+  const weights = { ...config.weights, [key]: value };
+  for (const k of others) {
+    weights[k] =
+      otherSum > 0
+        ? (config.weights[k] / otherSum) * remaining
+        : remaining / others.length;
+  }
+  return { ...config, weights };
 }
 
-function getNeighbors(p: Params): Params[] {
-  const neighbors: Params[] = [];
-  const step = 0.05;
+interface Move {
+  apply: (config: EvictionConfig, value: number) => EvictionConfig;
+  label: string;
+  values: number[];
+}
 
-  const keys: Array<keyof Params> = [
-    "coInvalidationBoost",
-    "pressureWeight",
-    "recencyWeight",
-    "softPressureThreshold",
-    "stalenessWeight",
-    "supersessionWeight",
-  ];
+function buildMoves(): Move[] {
+  const moves: Move[] = [];
 
-  for (const key of keys) {
-    if (key === "softPressureThreshold") {
-      const n1 = cloneParams(p);
-      n1[key] = p[key] + 5;
-      const n2 = cloneParams(p);
-      n2[key] = p[key] - 5;
-      neighbors.push(n1, n2);
-    } else {
-      const n1 = cloneParams(p);
-      n1[key] = p[key] + step;
-      const n2 = cloneParams(p);
-      n2[key] = p[key] - step;
-      neighbors.push(n1, n2);
-    }
+  for (const key of WEIGHT_KEYS) {
+    moves.push({
+      apply: (config, value) => withWeight(config, key, value),
+      label: `weight.${key}`,
+      values: GRID.weight,
+    });
   }
 
-  return neighbors;
+  // Only the honestly-learnable parameters are searched. The aggressiveness
+  // knobs (threshold, pressure knees, minBatchTokens) are fixed by principle in
+  // DEFAULT_EVICTION_CONFIG: replay cannot measure the cost of over-trimming, so
+  // letting the optimizer set aggressiveness would collapse the context to
+  // near-empty. What it CAN rank honestly is the relative weight of each signal
+  // and each tool's disposability.
+  moves.push({
+    apply: (config, value) => ({
+      ...config,
+      immutableStalenessConfidence: value,
+    }),
+    label: "immutableStalenessConfidence",
+    values: GRID.immutableStalenessConfidence,
+  });
+
+  for (const tool of SEMANTIC_TOOLS) {
+    moves.push({
+      apply: (config, value) => ({
+        ...config,
+        semanticByTool: { ...config.semanticByTool, [tool]: value },
+      }),
+      label: `semantic.${tool}`,
+      values: GRID.semantic,
+    });
+  }
+
+  return moves;
 }
 
-async function main() {
-  console.log("Loading traces and pricing...");
-  const traces = loadToolathlonTraces();
-  const pricing = await fetchModelPricing(
-    CACHE_DIR,
-    "github-copilot",
-    "claude-opus-4.5"
+function coordinateDescent(
+  start: EvictionConfig,
+  train: ParsedTrace[],
+  rounds: number
+): EvictionConfig {
+  const moves = buildMoves();
+  let best = start;
+  let bestEval = evaluate(best, train);
+  console.log(
+    `start: objective=${bestEval.objective.toFixed(4)} (usage=${(bestEval.meanUsage * 100).toFixed(1)}%, invalRate=${bestEval.invalidationRate.toFixed(3)})`
   );
-  if (!pricing) {
-    throw new Error("Opus pricing missing.");
-  }
-  const cwd = tmpdir();
 
-  console.log("Stage 1: Random Search (Coarse Sweep, 1000 samples)...");
-  const candidates: Array<{ params: Params; savings: number }> = [];
+  for (let round = 1; round <= rounds; round += 1) {
+    let improvedThisRound = false;
 
-  for (let i = 0; i < 1000; i += 1) {
-    const p = generateRandomParams();
-    const savings = evaluateConfig(p, traces, pricing, cwd);
-    candidates.push({ params: p, savings });
-  }
+    for (const move of moves) {
+      let localBest = best;
+      let localEval = bestEval;
 
-  candidates.sort((a, b) => b.savings - a.savings);
-  const topCandidates = candidates.slice(0, 10);
-
-  console.log("Stage 2: Local Coordinate Descent (Hill Climbing)...");
-  const [firstCandidate] = topCandidates;
-  if (!firstCandidate) {
-    throw new Error("No candidates evaluated.");
-  }
-  let bestParams = firstCandidate.params;
-  let bestSavings = firstCandidate.savings;
-
-  for (const cand of topCandidates) {
-    let current = cloneParams(cand.params);
-    let currentSavings = cand.savings;
-    let improved = true;
-
-    while (improved) {
-      improved = false;
-      const neighbors = getNeighbors(current);
-      for (const n of neighbors) {
-        if (
-          n.softPressureThreshold < 10 ||
-          n.softPressureThreshold > 90 ||
-          n.stalenessWeight < 0 ||
-          n.stalenessWeight > 1.0 ||
-          n.supersessionWeight < 0 ||
-          n.supersessionWeight > 1.0 ||
-          n.pressureWeight < 0 ||
-          n.pressureWeight > 1.0 ||
-          n.recencyWeight < 0 ||
-          n.recencyWeight > 1.0 ||
-          n.coInvalidationBoost < 0 ||
-          n.coInvalidationBoost > 1.0
-        ) {
-          continue;
+      for (const value of move.values) {
+        const trial = move.apply(best, value);
+        const trialEval = evaluate(trial, train);
+        if (trialEval.objective < localEval.objective - 1e-9) {
+          localBest = trial;
+          localEval = trialEval;
         }
+      }
 
-        const s = evaluateConfig(n, traces, pricing, cwd);
-        if (s > currentSavings) {
-          currentSavings = s;
-          current = n;
-          improved = true;
-        }
+      if (localEval.objective < bestEval.objective - 1e-9) {
+        best = localBest;
+        bestEval = localEval;
+        improvedThisRound = true;
+        console.log(
+          `  round ${round}: ${move.label.padEnd(28)} -> objective=${bestEval.objective.toFixed(4)} (usage=${(bestEval.meanUsage * 100).toFixed(1)}%, invalRate=${bestEval.invalidationRate.toFixed(3)})`
+        );
       }
     }
 
-    if (currentSavings > bestSavings) {
-      bestSavings = currentSavings;
-      bestParams = current;
+    if (!improvedThisRound) {
+      console.log(`  round ${round}: no improvement, converged.`);
+      break;
     }
   }
 
-  console.log("\n=== NORMALIZED OPTIMIZATION RESULTS (Threshold = 1.0) ===");
-  console.log("Best Weight Configuration:");
-  console.log(JSON.stringify(bestParams, null, 2));
-  console.log("Optimized Dollar Savings:", bestSavings.toFixed(4));
+  return best;
 }
 
-main().catch(console.error);
+function printConfig(config: EvictionConfig): void {
+  console.log("\nLearned config:");
+  console.log("  weights:");
+  for (const key of WEIGHT_KEYS) {
+    console.log(`    ${key.padEnd(14)} ${config.weights[key].toFixed(3)}`);
+  }
+  console.log(`  threshold                 ${config.threshold.toFixed(3)}`);
+  console.log(
+    `  immutableStalenessConf    ${config.immutableStalenessConfidence.toFixed(3)}`
+  );
+  console.log(
+    `  pressurePercentKnee       ${config.pressurePercentKnee.toFixed(3)}`
+  );
+  console.log(
+    `  pressureAbsoluteKnee      ${config.pressureAbsoluteKnee.toLocaleString()}`
+  );
+  console.log(
+    `  minBatchTokens            ${config.minBatchTokens.toLocaleString()}`
+  );
+  console.log("  semanticByTool:");
+  for (const tool of SEMANTIC_TOOLS) {
+    console.log(
+      `    ${tool.padEnd(6)} ${(config.semanticByTool[tool] ?? 0).toFixed(3)}`
+    );
+  }
+}
+
+function printEval(label: string, e: Evaluation): void {
+  console.log(
+    `${label.padEnd(10)} objective=${e.objective.toFixed(4)}  meanUsage=${(e.meanUsage * 100).toFixed(1)}%  invalRate=${e.invalidationRate.toFixed(3)}  recallRate=${e.prematureRecallRate.toFixed(3)}  overflow=${e.overflow.toLocaleString()}`
+  );
+}
+
+function main() {
+  const all = loadToolathlonTraces();
+  const train: ParsedTrace[] = [];
+  const holdout: ParsedTrace[] = [];
+  all.forEach((trace, i) => {
+    if (i % HOLDOUT_STRIDE === 0) {
+      holdout.push(trace);
+    } else {
+      train.push(trace);
+    }
+  });
+
+  console.log(
+    `Coordinate-descent search over ${buildMoves().length} parameters.`
+  );
+  console.log(
+    `Objective = mean context usage + ${LAMBDA} * invalidation rate + ${MU} * recall rate, overflow=0 hard.\n`
+  );
+  console.log(`Train: ${train.length} traces, holdout: ${holdout.length}.\n`);
+
+  const learned = coordinateDescent(DEFAULT_EVICTION_CONFIG, train, 6);
+
+  printConfig(learned);
+
+  console.log("");
+  const learnedHoldout = evaluate(learned, holdout);
+  const baselineHoldout = evaluate(DEFAULT_EVICTION_CONFIG, holdout);
+  printEval("learn/train", evaluate(learned, train));
+  printEval("learn/hold", learnedHoldout);
+  printEval("princ/hold", baselineHoldout);
+
+  // Honest guard against overfitting: only adopt the learned weights if they
+  // actually generalize. With aggressiveness fixed and the over-trim exploit
+  // closed, the learned weights typically overfit the train split and do NOT
+  // beat the principled defaults out-of-sample — in which case we ship the
+  // principled config. The value lives in the structure, not the fine weights.
+  if (learnedHoldout.objective < baselineHoldout.objective - 1e-4) {
+    console.log(
+      "\nLearned weights generalize (beat principled defaults on holdout)."
+    );
+    console.log("Consider adopting them in src/eviction.ts.");
+  } else {
+    console.log(
+      "\nLearned weights DO NOT beat the principled defaults on holdout"
+    );
+    console.log(
+      "(they overfit the train split). Keep DEFAULT_EVICTION_CONFIG as shipped."
+    );
+  }
+}
+
+main();

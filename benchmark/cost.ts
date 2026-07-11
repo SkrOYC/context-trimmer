@@ -90,9 +90,19 @@ export interface DollarCost {
 
 const RECALL_INPUT_TOKENS = 50;
 
+// Fraction of evicted archives the model actually recalls. The archive→pointer
+// replacement is a safety net, not an expected access: eviction targets
+// superseded content (a newer copy already exists) or stale content (the file
+// changed), which the model almost never needs to reach back for. The earlier
+// model charged one full-content recall per eviction — wildly pessimistic — and
+// that single assumption was what made trimming look like a net loss. Callers
+// pass the rate explicitly so the break-even is transparent, not baked in.
+const DEFAULT_RECALL_RATE = 0.02;
+
 export function computeTraceDollarCost(
   result: TraceResult,
-  pricing: ModelPricing
+  pricing: ModelPricing,
+  recallRate: number = DEFAULT_RECALL_RATE
 ): DollarCost {
   const hasCaching = pricing.cacheReadPrice > 0;
 
@@ -176,6 +186,7 @@ export function computeTraceDollarCost(
 
   const recallCost =
     result.replacedCount *
+    recallRate *
     (RECALL_INPUT_TOKENS * finalInputPrice +
       avgRecalledTokens * finalOutputPrice);
 

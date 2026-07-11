@@ -13,16 +13,22 @@ export function createContextHandler(pi: ExtensionAPI, state: ArchiveState) {
     try {
       rebuildState(ctx);
 
-      // Select archives to replace using a single eviction score. Supersession
-      // coverage is one input to that score, not a separate automatic replacement
-      // trigger, so we avoid unnecessary KV-cache invalidations.
+      // Decisive-batch eviction: hold the append-only context until it crosses
+      // the pressure trigger, then replace one batch down to the target. The
+      // persistent evictedPointers set makes eviction append-only across turns
+      // (a pointer we replaced before stays replaced), so we never re-invalidate
+      // a KV-cache suffix we already paid to rewrite.
       const toReplace = selectEvictionCandidates(
         event.messages,
         archivesByPath,
         activeArchives,
         getEvictionContext(ctx),
-        ctx.cwd
+        ctx.cwd,
+        state.evictedPointers
       );
+      for (const pointerId of toReplace) {
+        state.evictedPointers.add(pointerId);
+      }
 
       // Build a reverse lookup from toolCallId to archive for fast replacement.
       const archiveByToolCallId = new Map<string, ArchivedResult>();

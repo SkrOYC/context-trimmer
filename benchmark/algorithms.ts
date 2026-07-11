@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ContextUsage } from "../src/eviction";
+import type { ContextUsage, EvictionConfig } from "../src/eviction";
 import { selectEvictionCandidates } from "../src/eviction";
 import type { ArchivedResult } from "../src/types";
 
@@ -8,24 +8,57 @@ export type CandidateSelector = (
   archivesByPath: Map<string, ArchivedResult[]>,
   activeArchives: Map<string, ArchivedResult>,
   usage: ContextUsage,
-  cwd: string
+  cwd: string,
+  alreadyEvicted: ReadonlySet<string>,
+  stalenessOverride?: ReadonlyMap<string, boolean>
 ) => Set<string>;
 
 export const noReplacement: CandidateSelector = () => new Set<string>();
+
+/**
+ * Bind a specific EvictionConfig to the shipped eviction algorithm, so the
+ * optimizer can compare configs against the exact production code path.
+ */
+export function makeProduction(config: EvictionConfig): CandidateSelector {
+  return (
+    messages,
+    archivesByPath,
+    activeArchives,
+    usage,
+    cwd,
+    alreadyEvicted,
+    stalenessOverride
+  ) =>
+    selectEvictionCandidates(
+      messages,
+      archivesByPath,
+      activeArchives,
+      usage,
+      cwd,
+      alreadyEvicted,
+      config,
+      stalenessOverride
+    );
+}
 
 export const currentAlgorithm: CandidateSelector = (
   messages,
   archivesByPath,
   activeArchives,
   usage,
-  cwd
+  cwd,
+  alreadyEvicted,
+  stalenessOverride
 ) =>
   selectEvictionCandidates(
     messages,
     archivesByPath,
     activeArchives,
     usage,
-    cwd
+    cwd,
+    alreadyEvicted,
+    undefined,
+    stalenessOverride
   );
 
 function buildToolCallIdIndex(
@@ -91,33 +124,6 @@ export function oldestFirst(targetReductionRatio: number): CandidateSelector {
     }
 
     return toReplace;
-  };
-}
-
-export function supersessionOnly(): CandidateSelector {
-  return (
-    messages: AgentMessage[],
-    archivesByPath: Map<string, ArchivedResult[]>,
-    activeArchives: Map<string, ArchivedResult>,
-    usage: ContextUsage,
-    cwd: string
-  ): Set<string> => {
-    // Always run the current algorithm but with zero pressure contribution by
-    // clamping the reported usage to just below the soft threshold. This lets
-    // us measure how much replacement comes purely from staleness/supersession
-    // signals.
-    const dampedUsage: ContextUsage = {
-      contextWindow: usage.contextWindow,
-      percent: 70,
-      tokens: usage.tokens,
-    };
-    return selectEvictionCandidates(
-      messages,
-      archivesByPath,
-      activeArchives,
-      dampedUsage,
-      cwd
-    );
   };
 }
 
@@ -307,100 +313,14 @@ export function makeOptimizedCacheAware(
   };
 }
 
-function computePressureScoreUnopt(percent: number): number {
-  if (percent <= 70) {
-    return 0;
-  }
-  const progress = Math.min((percent - 70) / 30, 1);
-  return progress * 0.4;
-}
-
-function computeEvictionScoreUnopt(
-  m: { index: number; coverage: number; threshold: number },
-  isStale: boolean,
-  totalMessages: number,
-  pressureScore: number,
-  firstReplacementIndex: number
-): number {
-  const recencyRatio = m.index / (totalMessages - 1 || 1);
-
-  let score = 0;
-  if (isStale) {
-    score += 0.4;
-  }
-  score += Math.min(m.coverage / m.threshold, 1.0) * 0.35;
-  score += pressureScore;
-  score += recencyRatio * 0.2;
-
-  const hasEvictionSignal = isStale || m.coverage > 0;
-  if (m.index >= firstReplacementIndex && hasEvictionSignal) {
-    score += 0.25;
-  }
-
-  return score;
-}
-
-export const unoptimizedProduction: CandidateSelector = (
-  messages,
-  archivesByPath,
-  activeArchives,
-  usage,
-  cwd
-) => {
-  const toReplace = new Set<string>();
-  const percent = usage.percent ?? 0;
-
-  if (percent < 70) {
-    return toReplace;
-  }
-
-  const metrics = computeArchiveMetrics(messages, archivesByPath).sort(
-    (a, b) => a.index - b.index
-  );
-  if (metrics.length === 0) {
-    return toReplace;
-  }
-
-  const candidateArchives = metrics
-    .map((m) => activeArchives.get(m.pointerId))
-    .filter((arc): arc is ArchivedResult => arc !== undefined);
-
-  const staleByPointer = checkStalenessBatch(candidateArchives, cwd);
-  const totalMessages = messages.length;
-  const pressureScore = computePressureScoreUnopt(percent);
-  const scoreThreshold = percent >= 85 ? 0.55 : 0.75;
-
-  let firstReplacementIndex = Number.POSITIVE_INFINITY;
-
-  for (const m of metrics) {
-    const arc = activeArchives.get(m.pointerId);
-    if (!arc) {
-      continue;
-    }
-
-    const isStale = staleByPointer.get(m.pointerId) ?? false;
-    const score = computeEvictionScoreUnopt(
-      m,
-      isStale,
-      totalMessages,
-      pressureScore,
-      firstReplacementIndex
-    );
-
-    if (score >= scoreThreshold) {
-      toReplace.add(m.pointerId);
-      firstReplacementIndex = Math.min(firstReplacementIndex, m.index);
-    }
-  }
-
-  return toReplace;
-};
-
 export const ALGORITHMS: Record<string, CandidateSelector> = {
+  // Baselines.
   "no-replacement": noReplacement,
   "oldest-first-30": oldestFirst(0.3),
+  // The marginal-cost model: evict when the sustained cache-read savings beat the
+  // one-time suffix invalidation plus expected recall. Kept as a comparison.
   "optimized-cache-aware": optimizedCacheAware,
-  "optimized-production": currentAlgorithm,
-  "supersession-only": supersessionOnly(),
-  "unoptimized-production": unoptimizedProduction,
+  // The shipped production policy (src/eviction.ts) — the exact code path a live
+  // agent runs, exercised here without any benchmark-only reparameterization.
+  production: currentAlgorithm,
 };
