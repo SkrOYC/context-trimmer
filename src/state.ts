@@ -1,10 +1,15 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ArchivedResult } from "./types";
-import { ARCHIVE_TYPE } from "./types";
+import { ARCHIVE_TYPE, getArchiveGroupKey } from "./types";
 
 export interface ArchiveState {
   activeArchives: Map<string, ArchivedResult>;
   archivesByPath: Map<string, ArchivedResult[]>;
+  // Pointers already replaced by a compact archive marker in earlier turns.
+  // Eviction is append-only: once a pointer is here it stays replaced for the
+  // rest of the session, so we never re-invalidate a KV-cache suffix we already
+  // paid to rewrite. Deliberately NOT cleared by rebuildState.
+  evictedPointers: Set<string>;
   rebuildState: (ctx: ExtensionContext) => void;
   registerArchive: (arc: ArchivedResult) => void;
 }
@@ -12,6 +17,7 @@ export interface ArchiveState {
 export function createArchiveState(): ArchiveState {
   const activeArchives = new Map<string, ArchivedResult>();
   const archivesByPath = new Map<string, ArchivedResult[]>();
+  const evictedPointers = new Set<string>();
 
   function rebuildState(ctx: ExtensionContext) {
     activeArchives.clear();
@@ -29,13 +35,22 @@ export function createArchiveState(): ArchiveState {
   }
 
   function registerArchive(arc: ArchivedResult) {
-    if (!activeArchives.has(arc.pointerId)) {
-      activeArchives.set(arc.pointerId, arc);
-      const list = archivesByPath.get(arc.parameterKey) ?? [];
-      list.push(arc);
-      archivesByPath.set(arc.parameterKey, list);
+    if (activeArchives.has(arc.pointerId)) {
+      return;
     }
+
+    activeArchives.set(arc.pointerId, arc);
+    const groupKey = getArchiveGroupKey(arc.toolName, arc.parameterKey);
+    const list = archivesByPath.get(groupKey) ?? [];
+    list.push(arc);
+    archivesByPath.set(groupKey, list);
   }
 
-  return { activeArchives, archivesByPath, rebuildState, registerArchive };
+  return {
+    activeArchives,
+    archivesByPath,
+    evictedPointers,
+    rebuildState,
+    registerArchive,
+  };
 }

@@ -111,7 +111,8 @@ describe("Pi Context Trimmer Extension", () => {
 
   function makeToolResultMessage(
     toolCallId: string,
-    text: string
+    text: string,
+    toolName = "read"
   ): AgentMessage {
     return {
       content: [{ text, type: "text" }],
@@ -119,15 +120,36 @@ describe("Pi Context Trimmer Extension", () => {
       role: "toolResult",
       timestamp: Date.now(),
       toolCallId,
-      toolName: "read",
+      toolName,
     };
   }
 
-  function makeUserMessage(text: string): AgentMessage {
+  function makeBashResult(toolCallId: string, command: string, text: string) {
     return {
-      content: [{ text, type: "text" }],
-      role: "user",
-      timestamp: Date.now(),
+      content: [{ text, type: "text" as const }],
+      details: undefined,
+      input: { command },
+      isError: false,
+      toolCallId,
+      toolName: "bash" as const,
+      type: "tool_result" as const,
+    };
+  }
+
+  function makeGrepResult(
+    toolCallId: string,
+    pattern: string,
+    text: string,
+    path?: string
+  ) {
+    return {
+      content: [{ text, type: "text" as const }],
+      details: undefined,
+      input: { pattern, ...(path && { path }) },
+      isError: false,
+      toolCallId,
+      toolName: "grep" as const,
+      type: "tool_result" as const,
     };
   }
 
@@ -246,57 +268,6 @@ describe("Pi Context Trimmer Extension", () => {
     expect(text).not.toContain("Results Archive");
   });
 
-  it("should replace an old read when a newer read covers >=60% of its range", async () => {
-    const { runner } = await loadExtension();
-
-    const filePath = join(tempDir, "file.txt");
-    const lines = Array.from(
-      { length: 200 },
-      (_, i) => `Line ${i + 1} ${"x".repeat(100)}`
-    );
-    writeFileSync(filePath, lines.join("\n"), "utf8");
-
-    // Old read covers lines 1-200
-    const oldText = lines.join("\n");
-    await runner.emitToolResult(
-      makeReadResult(
-        "call-1",
-        { limit: 200, offset: 1, path: filePath },
-        oldText
-      )
-    );
-
-    // Newer read covers lines 1-150 (75% of old read)
-    const newText = lines.slice(0, 150).join("\n");
-    await runner.emitToolResult(
-      makeReadResult(
-        "call-2",
-        { limit: 150, offset: 1, path: filePath },
-        newText
-      )
-    );
-
-    const messages: AgentMessage[] = [
-      makeToolResultMessage("call-1", oldText),
-      makeToolResultMessage("call-2", newText),
-    ];
-
-    const compiled = await runner.emitContext(messages);
-
-    // Old read at index 0 of 2 messages: threshold = 0.60, coverage = 0.75
-    expect(
-      ((compiled[0] as any)?.content?.[0] as { text: string }).text
-    ).toContain("[Results Archive:");
-    expect(
-      ((compiled[0] as any)?.content?.[0] as { text: string }).text
-    ).toContain("(Invalidated - Stale)");
-
-    // Newer read stays verbatim
-    expect(((compiled[1] as any)?.content?.[0] as { text: string }).text).toBe(
-      newText
-    );
-  });
-
   it("should NOT replace an old read when newer read overlap is below threshold", async () => {
     const { runner } = await loadExtension();
 
@@ -342,127 +313,16 @@ describe("Pi Context Trimmer Extension", () => {
     );
   });
 
-  it("should accumulate overlap from multiple newer reads to supersede an old read", async () => {
-    const { runner } = await loadExtension();
-
-    const filePath = join(tempDir, "file.txt");
-    const lines = Array.from(
-      { length: 200 },
-      (_, i) => `Line ${i + 1} ${"x".repeat(100)}`
-    );
-    writeFileSync(filePath, lines.join("\n"), "utf8");
-
-    // Old read: lines 1-200
-    const oldText = lines.join("\n");
-    await runner.emitToolResult(
-      makeReadResult(
-        "call-1",
-        { limit: 200, offset: 1, path: filePath },
-        oldText
-      )
-    );
-
-    // Newer read 2: lines 150-180 (31 lines, ~15.5%)
-    const text2 = lines.slice(149, 180).join("\n");
-    await runner.emitToolResult(
-      makeReadResult(
-        "call-2",
-        { limit: 31, offset: 150, path: filePath },
-        text2
-      )
-    );
-
-    // Newer read 3: lines 75-140 (66 lines, 33%)
-    const text3 = lines.slice(74, 140).join("\n");
-    await runner.emitToolResult(
-      makeReadResult("call-3", { limit: 66, offset: 75, path: filePath }, text3)
-    );
-
-    // Cumulative coverage so far: lines 75-180 = 106 lines / 200 = 53% < 60%
-    // Not yet superseded.
-    const messagesBefore: AgentMessage[] = [
-      makeToolResultMessage("call-1", oldText),
-      makeToolResultMessage("call-2", text2),
-      makeToolResultMessage("call-3", text3),
-    ];
-    const compiledBefore = await runner.emitContext(messagesBefore);
-    expect(
-      ((compiledBefore[0] as any)?.content?.[0] as { text: string }).text
-    ).toBe(oldText);
-
-    // Newer read 4: lines 1-74 (74 lines)
-    const text4 = lines.slice(0, 74).join("\n");
-    await runner.emitToolResult(
-      makeReadResult("call-4", { limit: 74, offset: 1, path: filePath }, text4)
-    );
-
-    // Cumulative coverage now: lines 1-180 = 180/200 = 90% >= 60%
-    const messagesAfter: AgentMessage[] = [
-      makeToolResultMessage("call-1", oldText),
-      makeToolResultMessage("call-2", text2),
-      makeToolResultMessage("call-3", text3),
-      makeToolResultMessage("call-4", text4),
-    ];
-    const compiledAfter = await runner.emitContext(messagesAfter);
-    expect(
-      ((compiledAfter[0] as any)?.content?.[0] as { text: string }).text
-    ).toContain("[Results Archive:");
-  });
-
-  it("should replace a recent read at a lower overlap threshold than an old read", async () => {
-    const { runner } = await loadExtension();
-
-    const filePath = join(tempDir, "file.txt");
-    const lines = Array.from(
-      { length: 100 },
-      (_, i) => `Line ${i + 1} ${"x".repeat(100)}`
-    );
-    writeFileSync(filePath, lines.join("\n"), "utf8");
-
-    // Pad with user messages so the target read is recent (high index)
-    const targetText = lines.join("\n");
-    await runner.emitToolResult(
-      makeReadResult(
-        "call-target",
-        { limit: 100, offset: 1, path: filePath },
-        targetText
-      )
-    );
-
-    // Newer read covers 40% of target read
-    const newerText = lines.slice(0, 40).join("\n");
-    await runner.emitToolResult(
-      makeReadResult(
-        "call-newer",
-        { limit: 40, offset: 1, path: filePath },
-        newerText
-      )
-    );
-
-    // Messages: [user, user, user, target, newer]
-    // target index = 3 of 4 (0-based), total = 5
-    // positionRatio = 3/4 = 0.75, recencyFactor = 0.25
-    // threshold = 0.25 + 0.35 * 0.25 = 0.3375
-    // coverage = 40/100 = 0.40 >= 0.3375 => superseded
-    const messages: AgentMessage[] = [
-      makeUserMessage("placeholder 1"),
-      makeUserMessage("placeholder 2"),
-      makeUserMessage("placeholder 3"),
-      makeToolResultMessage("call-target", targetText),
-      makeToolResultMessage("call-newer", newerText),
-    ];
-
-    const compiled = await runner.emitContext(messages);
-    expect(
-      ((compiled[3] as any)?.content?.[0] as { text: string }).text
-    ).toContain("[Results Archive:");
-    expect(((compiled[4] as any)?.content?.[0] as { text: string }).text).toBe(
-      newerText
-    );
-  });
-
-  it("should handle cascading supersession across multiple reads", async () => {
-    const { runner } = await loadExtension();
+  it("should NOT trim a fully superseded read when the freed amount is below the batch threshold", async () => {
+    // The old read is dead (superseded), but on its own it frees far fewer than
+    // minBatchTokens and there is no window pressure, so batching holds it: we
+    // don't spend a KV-cache invalidation on a tiny lone removal. It will flush
+    // with the next batch (or when pressure/overflow forces it).
+    const { runner } = await loadExtension({
+      contextWindow: 200_000,
+      percent: 30,
+      tokens: 60_000,
+    });
 
     const filePath = join(tempDir, "file.txt");
     const lines = Array.from(
@@ -472,150 +332,26 @@ describe("Pi Context Trimmer Extension", () => {
     writeFileSync(filePath, lines.join("\n"), "utf8");
 
     const text = lines.join("\n");
+    // Old read fully covered by an identical newer read (coverage = 100%).
     await runner.emitToolResult(
       makeReadResult("call-1", { limit: 100, offset: 1, path: filePath }, text)
     );
     await runner.emitToolResult(
       makeReadResult("call-2", { limit: 100, offset: 1, path: filePath }, text)
     );
-    await runner.emitToolResult(
-      makeReadResult("call-3", { limit: 100, offset: 1, path: filePath }, text)
-    );
 
     const messages: AgentMessage[] = [
       makeToolResultMessage("call-1", text),
       makeToolResultMessage("call-2", text),
-      makeToolResultMessage("call-3", text),
     ];
 
     const compiled = await runner.emitContext(messages);
 
-    // call-1 at index 0: threshold 0.60, coverage 100% -> superseded
-    expect(
-      ((compiled[0] as any)?.content?.[0] as { text: string }).text
-    ).toContain("[Results Archive:");
-    // call-2 at index 1: threshold 0.425, coverage 100% -> superseded
-    expect(
-      ((compiled[1] as any)?.content?.[0] as { text: string }).text
-    ).toContain("[Results Archive:");
-    // call-3 at index 2: no newer reads -> stays
-    expect(((compiled[2] as any)?.content?.[0] as { text: string }).text).toBe(
+    expect(((compiled[0] as any)?.content?.[0] as { text: string }).text).toBe(
       text
     );
-  });
-
-  it("should evict archives under hard context pressure even without supersession", async () => {
-    const { runner } = await loadExtension({
-      contextWindow: 200_000,
-      percent: 90,
-      tokens: 180_000,
-    });
-
-    const filePath = join(tempDir, "file.txt");
-    const lines = Array.from(
-      { length: 200 },
-      (_, i) => `Line ${i + 1} ${"x".repeat(100)}`
-    );
-    writeFileSync(filePath, lines.join("\n"), "utf8");
-
-    // Read 1: lines 1-200, at index 0 (old)
-    const text1 = lines.join("\n");
-    await runner.emitToolResult(
-      makeReadResult("call-1", { limit: 200, offset: 1, path: filePath }, text1)
-    );
-
-    // Read 2: lines 1-100 (50% coverage of Read 1), at index 1
-    const text2 = lines.slice(0, 100).join("\n");
-    await runner.emitToolResult(
-      makeReadResult("call-2", { limit: 100, offset: 1, path: filePath }, text2)
-    );
-
-    const messages: AgentMessage[] = [
-      makeToolResultMessage("call-1", text1),
-      makeToolResultMessage("call-2", text2),
-    ];
-
-    const compiled = await runner.emitContext(messages);
-
-    // Read 1 is not superseded (coverage 50% < threshold 60%), but under 90%
-    // pressure its eviction score crosses the hard threshold.
-    expect(
-      ((compiled[0] as any)?.content?.[0] as { text: string }).text
-    ).toContain("[Results Archive:");
-
-    // Read 2 has no newer reads and is recent; it stays.
     expect(((compiled[1] as any)?.content?.[0] as { text: string }).text).toBe(
-      text2
-    );
-  });
-
-  it("should boost newer candidate priority when an older read is already replaced", async () => {
-    const { runner } = await loadExtension({
-      contextWindow: 200_000,
-      percent: 95,
-      tokens: 190_000,
-    });
-
-    const filePath = join(tempDir, "file.txt");
-    const lines = Array.from(
-      { length: 200 },
-      (_, i) => `Line ${i + 1} ${"x".repeat(100)}`
-    );
-    writeFileSync(filePath, lines.join("\n"), "utf8");
-
-    // Read old: lines 1-200, at index 0. Will be superseded by Read newer (75% coverage).
-    const oldText = lines.join("\n");
-    await runner.emitToolResult(
-      makeReadResult(
-        "call-old",
-        { limit: 200, offset: 1, path: filePath },
-        oldText
-      )
-    );
-
-    // Read candidate: lines 150-200 (51 lines), at index 1. Read newer overlaps only line 150,
-    // so coverage is ~2% and it is NOT superseded on its own.
-    const candidateText = lines.slice(149, 200).join("\n");
-    await runner.emitToolResult(
-      makeReadResult(
-        "call-candidate",
-        { limit: 51, offset: 150, path: filePath },
-        candidateText
-      )
-    );
-
-    // Read newer: lines 1-150, at index 2. Supersedes Read old.
-    const newerText = lines.slice(0, 150).join("\n");
-    await runner.emitToolResult(
-      makeReadResult(
-        "call-newer",
-        { limit: 150, offset: 1, path: filePath },
-        newerText
-      )
-    );
-
-    const messages: AgentMessage[] = [
-      makeToolResultMessage("call-old", oldText),
-      makeToolResultMessage("call-candidate", candidateText),
-      makeToolResultMessage("call-newer", newerText),
-    ];
-
-    const compiled = await runner.emitContext(messages);
-
-    // Read old is superseded by Read newer.
-    expect(
-      ((compiled[0] as any)?.content?.[0] as { text: string }).text
-    ).toContain("[Results Archive:");
-
-    // Read candidate is after the first replacement and gets the co-invalidation
-    // boost, pushing its eviction score over the hard threshold.
-    expect(
-      ((compiled[1] as any)?.content?.[0] as { text: string }).text
-    ).toContain("[Results Archive:");
-
-    // Read newer is the freshest read and stays.
-    expect(((compiled[2] as any)?.content?.[0] as { text: string }).text).toBe(
-      newerText
+      text
     );
   });
 
@@ -964,16 +700,16 @@ describe("Pi Context Trimmer Extension", () => {
     expect(archiveEntry).toBeUndefined();
   });
 
-  it("should ignore non-read tool results", async () => {
+  it("should ignore unsupported tool results", async () => {
     const { runner } = await loadExtension();
 
     const emitResult = await runner.emitToolResult({
-      content: [{ text: "hello", type: "text" }],
+      content: [{ text: "wrote file", type: "text" }],
       details: undefined,
-      input: { command: "echo hello" },
+      input: { content: "hello", path: "file.txt" },
       isError: false,
-      toolCallId: "call-bash",
-      toolName: "bash",
+      toolCallId: "call-write",
+      toolName: "write",
       type: "tool_result",
     } as any);
 
@@ -984,5 +720,117 @@ describe("Pi Context Trimmer Extension", () => {
       (e) => e.type === "custom" && e.customType === "results-archive"
     );
     expect(archiveEntry).toBeUndefined();
+  });
+
+  it("should archive bash tool results", async () => {
+    const { runner } = await loadExtension();
+
+    const emitResult = await runner.emitToolResult(
+      makeBashResult("call-bash", "echo hello", "hello")
+    );
+
+    expect(emitResult).toBeUndefined();
+
+    const branch = sessionManager.getBranch();
+    const archiveEntry = branch.find(
+      (e) => e.type === "custom" && e.customType === "results-archive"
+    );
+    expect(archiveEntry).toBeDefined();
+
+    const arcData = (archiveEntry as any).data;
+    expect(arcData.toolName).toBe("bash");
+    expect(arcData.parameterKey).toBe("echo hello");
+    expect(arcData.stalenessStrategy).toBe("immutable");
+    expect(arcData.supersessionStrategy).toBe("exact-key");
+  });
+
+  it("should not supersede bash results with different commands", async () => {
+    const { runner } = await loadExtension();
+
+    const text1 = "output 1";
+    const text2 = "output 2";
+
+    await runner.emitToolResult(
+      makeBashResult("call-bash-1", "git status", text1)
+    );
+    await runner.emitToolResult(
+      makeBashResult("call-bash-2", "git log", text2)
+    );
+
+    const messages: AgentMessage[] = [
+      makeToolResultMessage("call-bash-1", text1, "bash"),
+      makeToolResultMessage("call-bash-2", text2, "bash"),
+    ];
+
+    const compiled = await runner.emitContext(messages);
+
+    expect(((compiled[0] as any)?.content?.[0] as { text: string }).text).toBe(
+      text1
+    );
+    expect(((compiled[1] as any)?.content?.[0] as { text: string }).text).toBe(
+      text2
+    );
+  });
+
+  it("should recall bash results as immutable/stale", async () => {
+    const { result, runner } = await loadExtension();
+
+    const output = "git status output";
+    await runner.emitToolResult(
+      makeBashResult("call-bash", "git status", output)
+    );
+
+    const branch = sessionManager.getBranch();
+    const archiveEntry = branch.find(
+      (e) => e.type === "custom" && e.customType === "results-archive"
+    );
+    expect(archiveEntry).toBeDefined();
+    const { pointerId } = (archiveEntry as any).data;
+
+    const [ext] = result.extensions;
+    if (!ext) {
+      throw new Error("Extension not loaded");
+    }
+    const recallTool = ext.tools.get("recall_result");
+    if (!recallTool) {
+      throw new Error("recall_result tool not registered");
+    }
+
+    const recallResult = await recallTool.definition.execute(
+      "recall-call",
+      { pointer_id: pointerId },
+      new AbortController().signal,
+      () => undefined,
+      runner.createContext()
+    );
+
+    expect((recallResult as { isError?: boolean }).isError).toBeFalsy();
+    expect(
+      (recallResult as { details?: { status?: string } }).details?.status
+    ).toBe("invalidated");
+    const [firstContent] = recallResult.content ?? [];
+    const { text } = firstContent as { text: string };
+    expect(text).toContain("<recalled-stale-content>");
+    expect(text).toContain(output);
+  });
+
+  it("should archive grep tool results", async () => {
+    const { runner } = await loadExtension();
+
+    await runner.emitToolResult(
+      makeGrepResult("call-grep", "foo", "file.ts:1:foo")
+    );
+
+    const branch = sessionManager.getBranch();
+    const archiveEntry = branch.find(
+      (e) => e.type === "custom" && e.customType === "results-archive"
+    );
+    expect(archiveEntry).toBeDefined();
+
+    const arcData = (archiveEntry as any).data;
+    expect(arcData.toolName).toBe("grep");
+    expect(arcData.parameterKey).toBe("foo");
+    expect(arcData.stalenessStrategy).toBe("immutable");
+    expect(arcData.supersessionStrategy).toBe("exact-key");
   });
 });

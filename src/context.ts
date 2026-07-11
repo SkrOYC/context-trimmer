@@ -4,7 +4,6 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { getEvictionContext, selectEvictionCandidates } from "./eviction";
 import type { ArchiveState } from "./state";
-import { findSupersededArchives } from "./supersession";
 import type { ArchivedResult } from "./types";
 
 export function createContextHandler(pi: ExtensionAPI, state: ArchiveState) {
@@ -14,18 +13,22 @@ export function createContextHandler(pi: ExtensionAPI, state: ArchiveState) {
     try {
       rebuildState(ctx);
 
-      // Compute superseded reads and pressure-based eviction candidates in one
-      // pass. Replacements are batched so the KV-cache miss is paid once, and
-      // the next turn sees a stable prefix.
-      const superseded = findSupersededArchives(event.messages, archivesByPath);
+      // Decisive-batch eviction: hold the append-only context until it crosses
+      // the pressure trigger, then replace one batch down to the target. The
+      // persistent evictedPointers set makes eviction append-only across turns
+      // (a pointer we replaced before stays replaced), so we never re-invalidate
+      // a KV-cache suffix we already paid to rewrite.
       const toReplace = selectEvictionCandidates(
         event.messages,
         archivesByPath,
         activeArchives,
         getEvictionContext(ctx),
-        superseded,
-        ctx.cwd
+        ctx.cwd,
+        state.evictedPointers
       );
+      for (const pointerId of toReplace) {
+        state.evictedPointers.add(pointerId);
+      }
 
       // Build a reverse lookup from toolCallId to archive for fast replacement.
       const archiveByToolCallId = new Map<string, ArchivedResult>();

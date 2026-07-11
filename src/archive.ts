@@ -2,10 +2,9 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { isReadToolResult } from "@earendil-works/pi-coding-agent";
 import type { ArchiveState } from "./state";
 import { ARCHIVE_TYPE, type ArchivedResult, POLICIES } from "./types";
-import { getHash, stripReadFooters } from "./utils";
+import { getHash } from "./utils";
 
 export function createArchiveHandler(pi: ExtensionAPI, state: ArchiveState) {
   const { rebuildState, registerArchive } = state;
@@ -16,33 +15,20 @@ export function createArchiveHandler(pi: ExtensionAPI, state: ArchiveState) {
       return;
     }
 
-    if (!isReadToolResult(event)) {
-      return;
-    }
-
-    const rawText = event.content
-      .map((c) => (c.type === "text" ? c.text || "" : ""))
-      .join("\n");
-
     try {
       rebuildState(ctx);
 
-      // Determine the actual file content returned by the read tool, excluding
-      // any continuation/truncation footers it appends. Prefer the structured
-      // truncation metadata when available, otherwise strip known footer patterns.
-      const truncation = event.details?.truncation;
-      let contentStr: string;
-      if (truncation) {
-        if (truncation.firstLineExceedsLimit) {
-          // No actual file content was returned; nothing to archive.
-          return;
-        }
-        contentStr = truncation.content;
-      } else {
-        contentStr = stripReadFooters(rawText);
+      const contentStr = policy.extractContent(event);
+      if (contentStr === undefined) {
+        // No archivable content was returned (e.g. oversized line / empty result).
+        return;
       }
 
-      const paramKey = policy.getParameterKey(event.input) || "default";
+      const paramKey = policy.getParameterKey(event.input);
+      if (!paramKey) {
+        return;
+      }
+
       const offset = Number(event.input.offset) || 1;
       const lineHashes = contentStr.split("\n").map((line) => getHash(line));
 
@@ -52,7 +38,9 @@ export function createArchiveHandler(pi: ExtensionAPI, state: ArchiveState) {
         originalContent: JSON.stringify(event.content),
         parameterKey: paramKey,
         pointerId,
+        stalenessStrategy: policy.stalenessStrategy,
         startLine: offset,
+        supersessionStrategy: policy.supersessionStrategy,
         timestamp: Date.now(),
         toolCallId: event.toolCallId,
         toolName: event.toolName,
@@ -61,7 +49,7 @@ export function createArchiveHandler(pi: ExtensionAPI, state: ArchiveState) {
       pi.appendEntry<ArchivedResult>(ARCHIVE_TYPE, archiveRecord);
       registerArchive(archiveRecord);
     } catch (err) {
-      console.warn("[Context Trimmer] Failed to archive read result:", err);
+      console.warn("[Context Trimmer] Failed to archive tool result:", err);
     }
   });
 }
