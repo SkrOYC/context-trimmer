@@ -1,10 +1,42 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ArchivedResult } from "./types";
 
 export function getHash(str: string): string {
   return createHash("sha256").update(str).digest("hex");
+}
+
+function joinTextParts(parts: Array<{ type: string; text?: string }>): string {
+  return parts
+    .map((part) => (part.type === "text" ? (part.text ?? "") : ""))
+    .join("\n");
+}
+
+// AgentMessage is a union that spans plain LLM messages (user/assistant/toolResult)
+// and pi's own custom message roles (bashExecution, custom, branchSummary,
+// compactionSummary). Each role stores its text under a different field, and
+// "user"/"custom" content can be a plain string instead of a content-part array,
+// so there is no single `.content` shape to rely on across the whole union.
+export function getMessageText(message: AgentMessage): string {
+  if (message.role === "user" || message.role === "custom") {
+    const { content } = message;
+    return typeof content === "string" ? content : joinTextParts(content);
+  }
+  if (message.role === "assistant" || message.role === "toolResult") {
+    return joinTextParts(message.content);
+  }
+  if (message.role === "bashExecution") {
+    return message.output;
+  }
+  if (
+    message.role === "branchSummary" ||
+    message.role === "compactionSummary"
+  ) {
+    return message.summary;
+  }
+  return "";
 }
 
 // Footer patterns added by pi's read tool when more content exists beyond what was returned.

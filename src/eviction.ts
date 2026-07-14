@@ -2,7 +2,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { computeArchiveMetrics } from "./supersession";
 import type { ArchivedResult } from "./types";
-import { checkStalenessBatch } from "./utils";
+import { checkStalenessBatch, getMessageText } from "./utils";
 
 export interface ContextUsage {
   contextWindow: number | null;
@@ -114,10 +114,7 @@ export function getEvictionContext(ctx: ExtensionContext): ContextUsage {
 }
 
 function messageTokens(message: AgentMessage): number {
-  const text = message.content
-    .map((c) => (c.type === "text" ? (c.text ?? "") : ""))
-    .join("\n");
-  return Math.ceil(text.length / APPROX_CHARS_PER_TOKEN);
+  return Math.ceil(getMessageText(message).length / APPROX_CHARS_PER_TOKEN);
 }
 
 const POINTER_TOKENS = Math.ceil(

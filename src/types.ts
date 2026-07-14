@@ -1,4 +1,7 @@
-import type { ToolResultEvent } from "@earendil-works/pi-coding-agent";
+import type {
+  ToolResultEvent,
+  TruncationResult,
+} from "@earendil-works/pi-coding-agent";
 import { stripReadFooters } from "./utils";
 
 export const ARCHIVE_TYPE = "results-archive";
@@ -108,8 +111,17 @@ function joinTextContent(event: ToolResultEvent): string {
     .join("\n");
 }
 
+// The tools we archive (bash/grep/find/ls/read) all shape `details` as
+// `{ truncation?: TruncationResult }`, but ToolResultEvent is a union whose other
+// members (edit/write/custom) declare unrelated `details` types, so TypeScript
+// can't resolve `.truncation` on the union directly.
+function getTruncation(event: ToolResultEvent): TruncationResult | undefined {
+  return (event.details as { truncation?: TruncationResult } | undefined)
+    ?.truncation;
+}
+
 function extractGenericContent(event: ToolResultEvent): string | undefined {
-  const truncation = event.details?.truncation;
+  const truncation = getTruncation(event);
   if (truncation) {
     if (truncation.firstLineExceedsLimit) {
       return;
@@ -121,7 +133,7 @@ function extractGenericContent(event: ToolResultEvent): string | undefined {
 }
 
 function extractReadContent(event: ToolResultEvent): string | undefined {
-  const truncation = event.details?.truncation;
+  const truncation = getTruncation(event);
   if (truncation) {
     if (truncation.firstLineExceedsLimit) {
       return;

@@ -163,9 +163,11 @@ function parseFunctionCall(
   name: string,
   rawArgs: Record<string, unknown>
 ): ParsedToolathlonCall {
-  const parser =
-    TOOL_PARSER_BY_NAME[name] ?? (() => parseGenericToolArgs(name, rawArgs));
-  const result = parser(rawArgs);
+  // Falls back to the generic bash-command parser both when no parser is
+  // registered for this tool name and when a registered parser declines to
+  // handle these specific arguments (e.g. bash/python calls missing a command).
+  const result =
+    TOOL_PARSER_BY_NAME[name]?.(rawArgs) ?? parseGenericToolArgs(name, rawArgs);
 
   const mutatesPath =
     FILE_WRITE_TOOLS.has(name) && typeof rawArgs.path === "string"
@@ -239,7 +241,11 @@ function processToolMessage(
     return { turns: [], updatedCounter: toolCallCounter };
   }
 
-  const [{ parsed }] = pendingToolCalls.splice(idx, 1);
+  const [removed] = pendingToolCalls.splice(idx, 1);
+  if (!removed) {
+    return { turns: [], updatedCounter: toolCallCounter };
+  }
+  const { parsed } = removed;
   parsed.observation = observation;
 
   const nextCounter = toolCallCounter + 1;

@@ -1,5 +1,5 @@
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type {
-  AgentMessage,
   ExtensionContext,
   ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
@@ -16,17 +16,21 @@ function createMockExtensionContext(cwd: string): ExtensionContext {
     compact: () => undefined,
     cwd,
     getContextUsage: () => undefined,
-    getModel: () => undefined,
-    getSignal: () => new AbortController().signal,
     getSystemPrompt: () => "",
     hasPendingMessages: () => false,
+    hasUI: false,
     isIdle: () => true,
     isProjectTrusted: () => true,
+    mode: "print",
+    model: undefined,
+    modelRegistry: {} as unknown as ExtensionContext["modelRegistry"],
     sessionManager: {
       appendCustomEntry: () => undefined,
       getBranch: () => [],
     } as unknown as ExtensionContext["sessionManager"],
     shutdown: () => undefined,
+    signal: undefined,
+    ui: {} as unknown as ExtensionContext["ui"],
   };
 }
 

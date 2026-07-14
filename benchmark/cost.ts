@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ArchivedResult } from "../src/types";
+import { getMessageText } from "../src/utils";
 import type { ModelPricing } from "./pricing";
 import { pricePerToken } from "./pricing";
 import type { TraceResult } from "./types";
@@ -20,9 +21,7 @@ export function countTokens(text: string): number {
 }
 
 export function messageText(message: AgentMessage): string {
-  return message.content
-    .map((content) => (content.type === "text" ? content.text || "" : ""))
-    .join("\n");
+  return getMessageText(message);
 }
 
 export function computeTurnCost(
