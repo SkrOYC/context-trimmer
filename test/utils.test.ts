@@ -294,5 +294,14 @@ describe("Utils", () => {
     it("returns an empty map for an empty archive list", () => {
       expect(checkStalenessBatch([], tempDir).size).toBe(0);
     });
+
+    it("treats a directory path as stale instead of throwing (EISDIR)", () => {
+      // A read whose paramKey resolves to a directory makes readFileSync throw
+      // EISDIR. Unguarded this rejects the whole batch and aborts the eviction
+      // pass; it must instead mark the archive stale, like single checkStaleness.
+      const arc = makeArc("ptr-dir", tempDir, 1, ["whatever"]);
+      const result = checkStalenessBatch([arc], tempDir);
+      expect(result.get("ptr-dir")).toBe(true);
+    });
   });
 });

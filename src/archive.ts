@@ -15,6 +15,15 @@ export function createArchiveHandler(pi: ExtensionAPI, state: ArchiveState) {
       return;
     }
 
+    // Failed tool calls (a read of a directory -> EISDIR, a missing file ->
+    // ENOENT, a bash command exiting non-zero, ...) carry an error string, not
+    // recallable content. Archiving them line-hashes the error text and, for
+    // reads, records the offending path as a file-backed archive whose later
+    // staleness check tries to read a directory. Skip them entirely.
+    if (event.isError) {
+      return;
+    }
+
     try {
       rebuildState(ctx);
 

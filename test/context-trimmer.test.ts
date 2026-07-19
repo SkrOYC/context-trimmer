@@ -199,6 +199,36 @@ describe("Pi Context Trimmer Extension", () => {
     expect(arcData.lineHashes).toHaveLength(3);
   });
 
+  it("should NOT archive a failed tool result (e.g. reading a directory)", async () => {
+    const { runner } = await loadExtension();
+
+    // pi returns an error result when the model reads a directory. The paramKey
+    // would be the directory path, so archiving it creates a file-backed archive
+    // whose later staleness check reads a directory and throws. Skip it.
+    const emitResult = await runner.emitToolResult({
+      content: [
+        {
+          text: "EISDIR: illegal operation on a directory, read",
+          type: "text" as const,
+        },
+      ],
+      details: undefined,
+      input: { path: tempDir },
+      isError: true,
+      toolCallId: "call-err",
+      toolName: "read" as const,
+      type: "tool_result" as const,
+    });
+
+    expect(emitResult).toBeUndefined();
+
+    const branch = sessionManager.getBranch();
+    const archiveEntry = branch.find(
+      (e) => e.type === "custom" && e.customType === "results-archive"
+    );
+    expect(archiveEntry).toBeUndefined();
+  });
+
   it("should preserve raw content in context if the file on disk is unchanged", async () => {
     const { runner } = await loadExtension();
 

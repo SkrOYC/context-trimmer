@@ -152,8 +152,19 @@ function checkPathArchives(
     return;
   }
 
-  const diskContent = readFileSync(filePath, "utf8");
-  const diskLines = diskContent.split("\n");
+  // readFileSync throws if the path is a directory (EISDIR) or unreadable
+  // (EACCES). Left unguarded this rejects the whole batch and aborts the entire
+  // eviction pass for the turn. Match single-archive checkStaleness: treat any
+  // read failure as "stale" for every archive on this path.
+  let diskLines: string[];
+  try {
+    diskLines = readFileSync(filePath, "utf8").split("\n");
+  } catch {
+    for (const arc of pathArchives) {
+      result.set(arc.pointerId, true);
+    }
+    return;
+  }
 
   for (const arc of pathArchives) {
     result.set(arc.pointerId, checkArchiveAgainstLines(arc, diskLines));
