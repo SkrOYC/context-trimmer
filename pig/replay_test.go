@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -15,11 +17,7 @@ import (
 // The fixture is the real session branch: set PIG_REPLAY_FIXTURE, or it falls
 // back to PI_SESSION_FILE. Nothing is persisted; it is read-only analysis.
 
-const (
-	approxCharsPerTokenReplay = 4.0
-	inputPricePerToken        = 0.15 / 1_000_000
-	cacheReadPricePerToken    = 0.003 / 1_000_000
-)
+const approxCharsPerTokenReplay = 4.0
 
 type replayMetrics struct {
 	config            string
@@ -47,17 +45,18 @@ type replayInput struct {
 	dead               map[string]bool
 	contentChars       map[string]int
 	pointerForToolCall map[string]string
+	backfillCache      map[string]ArchivedResult
+	staleByPointer     map[string]bool
 	cwd                string
 	window             int
+	inputPrice         float64
+	cacheReadPrice     float64
 }
 
 func TestReplaySweep(t *testing.T) {
 	fixture := os.Getenv("PIG_REPLAY_FIXTURE")
 	if fixture == "" {
-		fixture = os.Getenv("PI_SESSION_FILE")
-	}
-	if fixture == "" {
-		t.Skip("set PIG_REPLAY_FIXTURE or PI_SESSION_FILE")
+		t.Skip("set PIG_REPLAY_FIXTURE to a session branch to run the replay sweep")
 	}
 	cwd := "/home/oscar/GitHub/pi-context-trimmer"
 
@@ -66,8 +65,10 @@ func TestReplaySweep(t *testing.T) {
 	if len(base.points) == 0 {
 		t.Skip("no provider turns in fixture")
 	}
+	base.inputPrice = envFloat("PIG_REPLAY_INPUT_PRICE", 0.15) / 1_000_000
+	base.cacheReadPrice = envFloat("PIG_REPLAY_CACHE_READ_PRICE", 0.003) / 1_000_000
 
-	for _, window := range []int{200_000, 300_000, 500_000, 750_000, 1_000_000} {
+	for _, window := range replayWindows() {
 		input := base
 		input.window = window
 
@@ -139,10 +140,25 @@ func buildReplayInput(branch []map[string]any, cwd string) replayInput {
 	dead := make(map[string]bool, len(full.activeArchives))
 	contentChars := make(map[string]int, len(full.activeArchives))
 	pointerForToolCall := make(map[string]string, len(full.activeArchives))
+	staleByPointer := make(map[string]bool, len(full.activeArchives))
 	for _, arc := range full.activeArchives {
 		dead[arc.PointerID] = isProvenDead(arc, full)
 		contentChars[arc.PointerID] = toolResultContentChars(arc.OriginalContent)
 		pointerForToolCall[arc.ToolCallID] = arc.PointerID
+		staleByPointer[arc.PointerID] = CheckStaleness(arc, cwd)
+	}
+	if os.Getenv("PIG_REPLAY_DEBUG") != "" {
+		deadCount, totalChars := 0, 0
+		for _, isDead := range dead {
+			if isDead {
+				deadCount++
+			}
+		}
+		for _, chars := range contentChars {
+			totalChars += chars
+		}
+		fmt.Printf("fixture: archives=%d dead=%d contentChars=%d (approx %d tok)\n",
+			len(full.activeArchives), deadCount, totalChars, totalChars/4)
 	}
 
 	return replayInput{
@@ -150,13 +166,16 @@ func buildReplayInput(branch []map[string]any, cwd string) replayInput {
 		realTokens: realTokens,
 		msgChars:   msgChars, msgCharPrefix: msgCharPrefix,
 		dead: dead, contentChars: contentChars, pointerForToolCall: pointerForToolCall,
-		cwd: cwd,
+		backfillCache:  full.backfillCache,
+		staleByPointer: staleByPointer,
+		cwd:            cwd,
 	}
 }
 
 func replayConfig(in replayInput, config EvictionConfig, noTrim bool) replayMetrics {
 	m := replayMetrics{config: configName(config)}
 	state := NewState()
+	state.backfillCache = in.backfillCache
 	evicted := make(map[string]struct{})
 	prevEvicted := make(map[string]struct{})
 	prevCount := 0
@@ -173,14 +192,19 @@ func replayConfig(in replayInput, config EvictionConfig, noTrim bool) replayMetr
 		toReplace := make(map[string]struct{})
 		if !noTrim {
 			toReplace = SelectEvictionCandidates(EvictionRequest{
-				Messages:       contextMessages,
-				ArchivesByPath: state.archivesByPath,
-				ActiveArchives: state.activeArchives,
-				Usage:          ContextUsage{ContextWindow: in.window, Tokens: &realTokens},
-				Cwd:            in.cwd,
-				AlreadyEvicted: evicted,
-				Config:         config,
+				Messages:          contextMessages,
+				ArchivesByPath:    state.archivesByPath,
+				ActiveArchives:    state.activeArchives,
+				Usage:             ContextUsage{ContextWindow: in.window, Tokens: &realTokens},
+				Cwd:               in.cwd,
+				AlreadyEvicted:    evicted,
+				Config:            config,
+				StalenessOverride: in.staleByPointer,
 			})
+		}
+
+		if os.Getenv("PIG_REPLAY_DEBUG") != "" && realTokens > 130_000 {
+			fmt.Printf("turn=%3d point=%3d arch=%3d replace=%3d realTok=%d\n", k, point, len(state.activeArchives), len(toReplace), realTokens)
 		}
 
 		untrimmedChars := in.msgCharPrefix[point]
@@ -220,7 +244,7 @@ func replayConfig(in replayInput, config EvictionConfig, noTrim bool) replayMetr
 		if cachedTokens < 0 {
 			cachedTokens = 0
 		}
-		m.contextCost += newTokens*inputPricePerToken + cachedTokens*cacheReadPricePerToken
+		m.contextCost += newTokens*in.inputPrice + cachedTokens*in.cacheReadPrice
 
 		m.untrimmedTokens += int(float64(untrimmedChars) / approxCharsPerTokenReplay)
 		m.compiledTokens += int(compiledTokens)
@@ -251,12 +275,34 @@ func replayConfig(in replayInput, config EvictionConfig, noTrim bool) replayMetr
 		if newTokens < 0 {
 			newTokens = 0
 		}
-		m.baselineCost += newTokens*inputPricePerToken + (compiledTokens-newTokens)*cacheReadPricePerToken
+		m.baselineCost += newTokens*in.inputPrice + (compiledTokens-newTokens)*in.cacheReadPrice
 		lastTokens = int(compiledTokens)
 	}
 
 	m.netSavings = m.baselineCost - m.contextCost
 	return m
+}
+
+func envFloat(name string, fallback float64) float64 {
+	if value := os.Getenv(name); value != "" {
+		if parsed, err := strconv.ParseFloat(value, 64); err == nil {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+func replayWindows() []int {
+	if value := os.Getenv("PIG_REPLAY_WINDOWS"); value != "" {
+		var out []int
+		for _, part := range strings.Split(value, ",") {
+			if parsed, err := strconv.Atoi(strings.TrimSpace(part)); err == nil {
+				out = append(out, parsed)
+			}
+		}
+		return out
+	}
+	return []int{200_000, 500_000, 1_000_000}
 }
 
 func contextTokensFromUsage(usage map[string]any) int {
@@ -311,18 +357,43 @@ func copySet(in map[string]struct{}) map[string]struct{} {
 }
 
 func configName(config EvictionConfig) string {
-	return fmt.Sprintf("thr=%.2f batch=%d pk=%.2f ak=%d",
-		config.Threshold, config.MinBatchTokens, config.PressurePercentKnee, config.PressureAbsoluteKnee)
+	return fmt.Sprintf("thr=%.2f aff=%.2f batch=%d",
+		config.Threshold, config.Weights.Affordability, config.MinBatchTokens)
+}
+
+// withAffordability sets the affordability share and rescales the other weights
+// so the shares still sum to 1.
+func withAffordability(base EvictionConfig, afford float64) EvictionConfig {
+	w := base.Weights
+	sum := w.Coldness + w.Pressure + w.Semantic + w.Size + w.Staleness + w.Supersession
+	rest := 1 - afford
+	w.Affordability = afford
+	w.Coldness = w.Coldness / sum * rest
+	w.Pressure = w.Pressure / sum * rest
+	w.Semantic = w.Semantic / sum * rest
+	w.Size = w.Size / sum * rest
+	w.Staleness = w.Staleness / sum * rest
+	w.Supersession = w.Supersession / sum * rest
+	base.Weights = w
+	return base
 }
 
 func configGrid() []EvictionConfig {
+	if os.Getenv("PIG_REPLAY_ONE") != "" {
+		config := DefaultEvictionConfig()
+		config.Threshold = 0.3
+		config.MinBatchTokens = 0
+		return []EvictionConfig{config}
+	}
 	var out []EvictionConfig
-	for _, threshold := range []float64{0.3, 0.4, 0.5, 0.6, 0.7} {
-		for _, batch := range []int{4000, 8000} {
-			config := DefaultEvictionConfig()
-			config.Threshold = threshold
-			config.MinBatchTokens = batch
-			out = append(out, config)
+	for _, threshold := range []float64{0.1, 0.2, 0.3, 0.4, 0.5} {
+		for _, afford := range []float64{0.1, 0.2, 0.3} {
+			for _, batch := range []int{0, 2000, 8000} {
+				config := withAffordability(DefaultEvictionConfig(), afford)
+				config.Threshold = threshold
+				config.MinBatchTokens = batch
+				out = append(out, config)
+			}
 		}
 	}
 	return out
