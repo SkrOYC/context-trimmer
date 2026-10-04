@@ -23,7 +23,8 @@
   "private": true,
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./src/index.ts",
+      "./pig"
     ]
   }
 }
