@@ -351,6 +351,36 @@ func TestBehaviorRecallPreservesAllContentFields(t *testing.T) {
 	}
 }
 
+func TestBehaviorFractionalOffsetIsAlwaysStale(t *testing.T) {
+	// A fractional read offset is stored as-is; like JS array indexing with a
+	// non-integer key, every line lookup misses, so the archive is stale.
+	dir := t.TempDir()
+	body := "one\ntwo\nthree"
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte(body), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	host := newHost(t, dir)
+
+	payload := readResult("tc1", "f.txt", body)
+	payload["input"] = map[string]any{"path": "f.txt", "offset": 2.5, "limit": 2000.0}
+	if _, err := host.ToolResult(payload); err != nil {
+		t.Fatalf("tool_result: %v", err)
+	}
+	arc := archiveData(t, host.Entries()[0])
+	if arc.StartLine != 2.5 {
+		t.Fatalf("startLine = %v, want 2.5", arc.StartLine)
+	}
+
+	result, err := host.CallTool("recall_result", "call-1", map[string]any{"pointer_id": arc.PointerID})
+	if err != nil {
+		t.Fatalf("recall: %v", err)
+	}
+	details, _ := result["details"].(map[string]any)
+	if details["status"] != "invalidated" {
+		t.Fatalf("fractional-offset archive should be stale; got %v", details)
+	}
+}
+
 func TestBehaviorRecallWrapsStaleContent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.txt")

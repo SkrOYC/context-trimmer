@@ -154,7 +154,7 @@ func archivedResultFromMap(data map[string]any) ArchivedResult {
 		ToolName:             stringValue(data["toolName"]),
 	}
 	if value, ok := numberValue(data["startLine"]); ok {
-		arc.StartLine = int(value)
+		arc.StartLine = value
 	}
 	if value, ok := numberValue(data["timestamp"]); ok {
 		arc.Timestamp = int64(value)

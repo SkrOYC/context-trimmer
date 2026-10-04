@@ -71,10 +71,11 @@ func handleToolResult(state *State, ctx sdk.Context, data map[string]any) (any, 
 	return nil, nil
 }
 
-// archiveStartLine mirrors the TypeScript `Number(input.offset) || 1`.
-func archiveStartLine(input map[string]any) int {
+// archiveStartLine mirrors the TypeScript `Number(input.offset) || 1` and keeps
+// a fractional offset as-is.
+func archiveStartLine(input map[string]any) float64 {
 	if offset, ok := numberValue(input["offset"]); ok && offset != 0 {
-		return int(offset)
+		return offset
 	}
 	return 1
 }

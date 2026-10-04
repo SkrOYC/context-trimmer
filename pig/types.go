@@ -39,7 +39,7 @@ type ArchivedResult struct {
 	ParameterKey         string               `json:"parameterKey"`
 	PointerID            string               `json:"pointerId"`
 	StalenessStrategy    StalenessStrategy    `json:"stalenessStrategy,omitempty"`
-	StartLine            int                  `json:"startLine"`
+	StartLine            float64              `json:"startLine"`
 	SupersessionStrategy SupersessionStrategy `json:"supersessionStrategy,omitempty"`
 	Timestamp            int64                `json:"timestamp"`
 	ToolCallID           string               `json:"toolCallId"`
@@ -52,10 +52,12 @@ func ArchiveGroupKey(toolName, parameterKey string) string {
 	return toolName + ":" + parameterKey
 }
 
-// LineRange is a 1-indexed, inclusive line interval.
+// LineRange is a 1-indexed, inclusive line interval. Its bounds are float64 to
+// mirror the TypeScript `number` type (a fractional read offset yields
+// undefined array indices there, which is reproduced in the staleness check).
 type LineRange struct {
-	Start int
-	End   int
+	Start float64
+	End   float64
 }
 
 // contentBlock is a text or image block of a tool result.

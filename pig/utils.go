@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -183,8 +184,8 @@ func MergeIntervals(intervals []LineRange) []LineRange {
 }
 
 // TotalIntervalLength sums the covered lines of disjoint intervals.
-func TotalIntervalLength(intervals []LineRange) int {
-	total := 0
+func TotalIntervalLength(intervals []LineRange) float64 {
+	total := 0.0
 	for _, interval := range intervals {
 		total += interval.End - interval.Start + 1
 	}
@@ -197,11 +198,17 @@ func isFileBacked(arc ArchivedResult) bool {
 
 func checkArchiveAgainstLines(arc ArchivedResult, diskLines []string) bool {
 	for i, hash := range arc.LineHashes {
-		lineIndex := arc.StartLine - 1 + i
-		if lineIndex < 0 || lineIndex >= len(diskLines) {
+		lineIndex := arc.StartLine - 1 + float64(i)
+		// A non-integer index is undefined under JS array indexing, which is what
+		// the TypeScript staleness check does; treat it as stale.
+		if lineIndex != math.Trunc(lineIndex) {
 			return true
 		}
-		if GetHash(diskLines[lineIndex]) != hash {
+		index := int(lineIndex)
+		if index < 0 || index >= len(diskLines) {
+			return true
+		}
+		if GetHash(diskLines[index]) != hash {
 			return true
 		}
 	}

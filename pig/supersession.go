@@ -39,7 +39,7 @@ func ComputeSupersessionThreshold(messageIndex, totalMessages int) float64 {
 }
 
 func getArchiveRange(arc ArchivedResult) LineRange {
-	return LineRange{Start: arc.StartLine, End: arc.StartLine + len(arc.LineHashes) - 1}
+	return LineRange{Start: arc.StartLine, End: arc.StartLine + float64(len(arc.LineHashes)) - 1}
 }
 
 func intersectRanges(a, b LineRange) (LineRange, bool) {
@@ -65,7 +65,7 @@ func computeLineRangeCoverage(target ArchivedResult, laterReads []ArchivedResult
 	}
 
 	merged := MergeIntervals(overlaps)
-	return float64(TotalIntervalLength(merged)) / float64(len(target.LineHashes))
+	return TotalIntervalLength(merged) / float64(len(target.LineHashes))
 }
 
 func getSupersessionStrategy(arc ArchivedResult) SupersessionStrategy {
