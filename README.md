@@ -206,14 +206,25 @@ The behavior tests in `pig/behavior_test.go` drive the real handlers and the
 
 ## Configuration and tuning
 
-The aggressiveness knobs (threshold, pressure knees, batch size) are set by
-principle, not fit to a benchmark; the signal weights and per-tool semantics are
-the tunable surface.
+By default the trimmer **tunes itself to the active model** at runtime, so there
+is nothing to set per session:
+
+- It reads the model's input and cache-read prices from the host
+  (`GetModelInfo` / `ctx.model.cost`) and its context window.
+- Still-valid content is evicted only when the cache-read savings over a 50-turn
+  horizon beat the one-time cost of re-sending the invalidated suffix:
+  `freed · H > (1 − affordability) · compiled · (input/cacheRead − 1)`.
+- This self-separates: conservative where cached reads are cheap (a 50× input
+  ratio), aggressive where they are not (a 10× ratio), with no per-model
+  threshold. If the host reports no prices, it falls back to the conservative
+  proven-dead-only policy.
+
+Proven-dead content (stale or superseded) always evicts. The weights, pressure
+knees, and per-tool semantics remain available as the tunable surface and are
+used only by the fixed-threshold fallback:
 
 - TypeScript: `DEFAULT_EVICTION_CONFIG` in `src/eviction.ts`.
 - Go: `DefaultEvictionConfig()` in `pig/eviction.go`.
-
-Both hold the same weights, knees, and per-tool semantics.
 
 ## Data schema
 

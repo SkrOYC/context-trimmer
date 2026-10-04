@@ -30,6 +30,7 @@ type Host struct {
 	mu      sync.Mutex
 	entries []map[string]any
 	usage   map[string]any
+	model   map[string]any
 
 	runErr chan error
 }
@@ -79,7 +80,11 @@ func New(ext *sdk.Extension, cwd string) (*Host, error) {
 		handlers: make(map[string]int),
 		tools:    make(map[string]bool),
 		usage:    map[string]any{"tokens": 0, "contextWindow": 200_000, "percent": 0.0},
-		runErr:   make(chan error, 1),
+		model: map[string]any{
+			"id": "test-model", "provider": "test", "contextWindow": 200_000,
+			"inputCostPer1M": 2.0, "outputCostPer1M": 8.0, "cacheReadCostPer1M": 0.2,
+		},
+		runErr: make(chan error, 1),
 	}
 	go func() { host.runErr <- ext.RunWithConn(server) }()
 
@@ -164,6 +169,15 @@ func (h *Host) SetContextWindow(window int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.usage["contextWindow"] = window
+}
+
+// SetPrices sets the per-million input and cache-read prices reported by
+// getModelInfo. A zero cache-read price disables the net-benefit rule.
+func (h *Host) SetPrices(inputPer1M, cacheReadPer1M float64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.model["inputCostPer1M"] = inputPer1M
+	h.model["cacheReadCostPer1M"] = cacheReadPer1M
 }
 
 // SessionStart fires the session_start event.
@@ -305,6 +319,11 @@ func (h *Host) handleCall(env *envelope) error {
 		usage := cloneMap(h.usage)
 		h.mu.Unlock()
 		return h.replyCall(env.ID, usage)
+	case "getModelInfo":
+		h.mu.Lock()
+		model := cloneMap(h.model)
+		h.mu.Unlock()
+		return h.replyCall(env.ID, model)
 	default:
 		return h.replyCall(env.ID, nil)
 	}

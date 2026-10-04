@@ -392,13 +392,11 @@ func configGrid() []EvictionConfig {
 	}
 	if os.Getenv("PIG_REPLAY_NET") != "" {
 		var out []EvictionConfig
-		for _, horizon := range []int{10, 25, 50, 100} {
-			for _, batch := range []int{0, 2000, 8000} {
-				config := DefaultEvictionConfig()
-				config.AssumedRemainingTurns = horizon
-				config.MinBatchTokens = batch
-				out = append(out, config)
-			}
+		for _, batch := range []int{0, 500, 1000, 2000, 4000, 8000, 16000} {
+			config := DefaultEvictionConfig()
+			config.AssumedRemainingTurns = 50
+			config.MinBatchTokens = batch
+			out = append(out, config)
 		}
 		return out
 	}

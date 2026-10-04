@@ -454,3 +454,57 @@ func TestBehaviorRecallAfterRebuildFromBranch(t *testing.T) {
 		t.Fatalf("rebuild from branch lost the archive: %v", details)
 	}
 }
+
+func TestBehaviorNetBenefitEvictsValidContentWithCheapCache(t *testing.T) {
+	host := newHost(t, t.TempDir())
+	host.SetPrices(2.0, 0.2) // ratio 10: cache reads are cheap
+
+	big := strings.Repeat("x", 40_000)
+	if _, err := host.ToolResult(bashResult("tc1", "echo one", big)); err != nil {
+		t.Fatalf("first bash result: %v", err)
+	}
+	if _, err := host.ToolResult(bashResult("tc2", "echo two", big)); err != nil {
+		t.Fatalf("second bash result: %v", err)
+	}
+
+	result, err := host.Context([]any{
+		userMessage("1"),
+		toolResultMessage("tc1", "bash", big),
+		userMessage("2"),
+		toolResultMessage("tc2", "bash", big),
+	})
+	if err != nil {
+		t.Fatalf("context: %v", err)
+	}
+	updated, _ := result["messages"].([]any)
+	if got := contentText(updated[1].(map[string]any)); !strings.HasPrefix(got, "[Results Archive: ptr_") {
+		t.Fatalf("valid content should evict when the cache is cheap; got %q", got)
+	}
+}
+
+func TestBehaviorNoPricingKeepsValidContent(t *testing.T) {
+	host := newHost(t, t.TempDir())
+	host.SetPrices(0, 0) // no cache pricing: the net-benefit rule is disabled
+
+	big := strings.Repeat("x", 40_000)
+	if _, err := host.ToolResult(bashResult("tc1", "echo one", big)); err != nil {
+		t.Fatalf("first bash result: %v", err)
+	}
+	if _, err := host.ToolResult(bashResult("tc2", "echo two", big)); err != nil {
+		t.Fatalf("second bash result: %v", err)
+	}
+
+	result, err := host.Context([]any{
+		userMessage("1"),
+		toolResultMessage("tc1", "bash", big),
+		userMessage("2"),
+		toolResultMessage("tc2", "bash", big),
+	})
+	if err != nil {
+		t.Fatalf("context: %v", err)
+	}
+	updated, _ := result["messages"].([]any)
+	if got := contentText(updated[1].(map[string]any)); got != big {
+		t.Fatalf("valid content should be kept without pricing; got %q", got)
+	}
+}

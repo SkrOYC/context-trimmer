@@ -63,6 +63,10 @@ func DefaultEvictionConfig() EvictionConfig {
 		PressurePercentKnee:          0.6,
 		SemanticByTool:               map[string]float64{"bash": 0.55, "find": 0.5, "grep": 0.5, "ls": 0.6, "read": 0.3},
 		Threshold:                    0.6,
+		// The net-benefit rule is the default: H=50 turns, with the input/cache
+		// ratio read from the active model at runtime. It self-adjusts to the
+		// model's cache economics, so no per-model threshold is needed.
+		AssumedRemainingTurns: 50,
 		Weights: EvictionWeights{
 			Affordability: 0.1,
 			Coldness:      0.15,
@@ -180,9 +184,8 @@ func costRatio(request EvictionRequest) float64 {
 // still-valid content needs genuine pressure and a weighted score over the
 // threshold. The co-location pass then re-scores the suffix after the oldest
 // removal with affordability 1 (that suffix is a cache miss anyway).
-func collectEligible(candidates []candidate, pressure float64, config EvictionConfig, compiledTokens int, ratio float64) []candidate {
+func collectEligible(candidates []candidate, pressure float64, config EvictionConfig, compiledTokens int, ratio float64, useNetBenefit bool) []candidate {
 	underPressure := pressure > 0
-	useNetBenefit := config.AssumedRemainingTurns > 0 && ratio > 1
 	isEligible := func(c candidate, signals EvictionSignals) bool {
 		if c.provenDead {
 			return true
@@ -415,7 +418,9 @@ func SelectEvictionCandidates(request EvictionRequest) map[string]struct{} {
 		}))
 	}
 
-	eligible := collectEligible(candidates, pressure, request.Config, compiledTokens, costRatio(request))
+	ratio := costRatio(request)
+	useNetBenefit := request.Config.AssumedRemainingTurns > 0 && ratio > 1
+	eligible := collectEligible(candidates, pressure, request.Config, compiledTokens, ratio, useNetBenefit)
 	if len(eligible) == 0 {
 		return evicted
 	}
@@ -427,8 +432,9 @@ func SelectEvictionCandidates(request EvictionRequest) map[string]struct{} {
 	mustEvict := float64(compiledTokens) >= float64(window)*request.Config.OverflowGuardFraction
 
 	// Batch: hold small removals until enough mass accumulates, unless we are up
-	// against the window.
-	if freeTokens < request.Config.MinBatchTokens && !mustEvict {
+	// against the window. The net-benefit rule already prices each invalidation,
+	// so batching only delays profitable evictions and is skipped.
+	if !useNetBenefit && freeTokens < request.Config.MinBatchTokens && !mustEvict {
 		return evicted
 	}
 

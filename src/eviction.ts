@@ -5,7 +5,9 @@ import type { ArchivedResult } from "./types";
 import { checkStalenessBatch, getMessageText } from "./utils";
 
 export interface ContextUsage {
+  cacheReadCost?: number | null;
   contextWindow: number | null;
+  inputCost?: number | null;
   percent: number | null;
   tokens: number | null;
 }
@@ -44,6 +46,10 @@ export interface EvictionWeights {
 }
 
 export interface EvictionConfig {
+  // Net-benefit horizon in turns. When > 0, still-valid content is evicted only
+  // when the cache-read savings over that horizon beat the one-time suffix
+  // invalidation cost, using the model's live input/cache-read prices.
+  assumedRemainingTurns: number;
   // Confidence that an "immutable" tool result (bash/grep/find/ls) is stale. We
   // can PROVE a read is stale by re-hashing the file; for immutable tools we can
   // only assume it, so the staleness signal is discounted by this factor.
@@ -75,6 +81,10 @@ export interface EvictionConfig {
 // evict freely. The weight SHARES and per-tool semantics below CAN be learned
 // honestly from the benchmark (see benchmark/optimize.ts) and were tuned there.
 export const DEFAULT_EVICTION_CONFIG: EvictionConfig = {
+  // H=50 turns, with the input/cache ratio read from the active model. This
+  // self-adjusts to the model's cache economics, so no per-model threshold is
+  // needed. Set to 0 to fall back to the fixed score threshold.
+  assumedRemainingTurns: 50,
   // bash/grep/find/ls staleness is only assumed, never proven, so discount it.
   immutableStalenessConfidence: 0.4,
   // Batch ~4% of a 200k window before firing: keeps eviction to a few large,
@@ -106,8 +116,11 @@ const DEFAULT_SEMANTIC = 0.5;
 
 export function getEvictionContext(ctx: ExtensionContext): ContextUsage {
   const usage = ctx.getContextUsage();
+  const cost = ctx.model?.cost;
   return {
+    cacheReadCost: cost?.cacheRead ?? null,
     contextWindow: usage?.contextWindow ?? null,
+    inputCost: cost?.input ?? null,
     percent: usage?.percent ?? null,
     tokens: usage?.tokens ?? null,
   };
@@ -193,16 +206,44 @@ interface CandidateContext {
 // from throwing away good content early. The co-location pass then re-scores the
 // suffix after the oldest removal with affordability = 1 (that suffix is a cache
 // miss anyway) and collects everyone still eligible.
+function evictionRatio(usage: ContextUsage): number {
+  if (
+    typeof usage.inputCost !== "number" ||
+    typeof usage.cacheReadCost !== "number" ||
+    usage.cacheReadCost <= 0
+  ) {
+    return 0;
+  }
+  return usage.inputCost / usage.cacheReadCost;
+}
+
 function collectEligible(
   candidates: Candidate[],
   pressure: number,
-  config: EvictionConfig
+  config: EvictionConfig,
+  compiledTokens: number,
+  ratio: number,
+  useNetBenefit: boolean
 ): Candidate[] {
   const underPressure = pressure > 0;
-  const isEligible = (c: Candidate, signals: EvictionSignals): boolean =>
-    c.provenDead ||
-    (underPressure &&
-      scoreFromSignals(signals, config.weights) >= config.threshold);
+  const isEligible = (c: Candidate, signals: EvictionSignals): boolean => {
+    if (c.provenDead) {
+      return true;
+    }
+    if (useNetBenefit) {
+      // Net-benefit: cache-read savings over the horizon versus the one-time
+      // cost of re-sending the invalidated suffix.
+      const suffixTokens = (1 - signals.affordability) * compiledTokens;
+      return (
+        c.savedTokens * config.assumedRemainingTurns >
+        suffixTokens * (ratio - 1)
+      );
+    }
+    return (
+      underPressure &&
+      scoreFromSignals(signals, config.weights) >= config.threshold
+    );
+  };
 
   const firstRemovalIndex = candidates
     .filter((c) => isEligible(c, c.signals))
@@ -304,6 +345,9 @@ export function selectEvictionCandidates(
     return evicted;
   }
 
+  const ratio = evictionRatio(usage);
+  const useNetBenefit = config.assumedRemainingTurns > 0 && ratio > 1;
+
   const metrics = computeArchiveMetrics(messages, archivesByPath).sort(
     (a, b) => a.index - b.index
   );
@@ -379,7 +423,14 @@ export function selectEvictionCandidates(
     })
   );
 
-  const eligible = collectEligible(candidates, pressure, config);
+  const eligible = collectEligible(
+    candidates,
+    pressure,
+    config,
+    compiledTokens,
+    ratio,
+    useNetBenefit
+  );
   if (eligible.length === 0) {
     return evicted;
   }
@@ -388,8 +439,9 @@ export function selectEvictionCandidates(
   const mustEvict = compiledTokens >= window * config.overflowGuardFraction;
 
   // Batch: hold small removals until enough mass accumulates, unless we are up
-  // against the window.
-  if (freeTokens < config.minBatchTokens && !mustEvict) {
+  // against the window. The net-benefit rule already prices each invalidation,
+  // so batching only delays profitable evictions and is skipped.
+  if (!useNetBenefit && freeTokens < config.minBatchTokens && !mustEvict) {
     return evicted;
   }
 
