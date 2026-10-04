@@ -314,10 +314,20 @@ func SelectEvictionCandidates(request EvictionRequest) map[string]struct{} {
 	}
 
 	// Pressure is shared by every candidate this turn: the higher of the percent
-	// ramp and the absolute-token ramp.
+	// ramp and the absolute-token ramp. It uses the host's real context usage
+	// when available, because the message-text estimate ignores thinking blocks
+	// and tool-call arguments and would badly understate the window pressure.
+	pressureTokens := float64(compiledTokens)
+	if request.Usage.Tokens != nil {
+		pressureTokens = float64(*request.Usage.Tokens)
+	}
+	pressureFraction := pressureTokens / float64(window)
+	if request.Usage.Percent != nil {
+		pressureFraction = *request.Usage.Percent
+	}
 	pressure := math.Max(
-		ramp(float64(compiledTokens)/float64(window), request.Config.PressurePercentKnee, 1),
-		ramp(float64(compiledTokens), float64(request.Config.PressureAbsoluteKnee), float64(window)),
+		ramp(pressureFraction, request.Config.PressurePercentKnee, 1),
+		ramp(pressureTokens, float64(request.Config.PressureAbsoluteKnee), float64(window)),
 	)
 
 	mostRecentIndex := -1

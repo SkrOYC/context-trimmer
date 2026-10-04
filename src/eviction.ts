@@ -327,11 +327,14 @@ export function selectEvictionCandidates(
       : (tokensByIndex[i] ?? 0);
   }
 
-  // Pressure is shared by every candidate this turn: the higher of the percent
-  // ramp and the absolute-token ramp.
+  // Pressure is shared by every candidate this turn. Use the host's real
+  // context usage when available: the message-text estimate ignores thinking
+  // blocks and tool-call arguments and would badly understate window pressure.
+  const pressureTokens = usage.tokens ?? compiledTokens;
+  const pressureFraction = usage.percent ?? pressureTokens / window;
   const pressure = Math.max(
-    ramp(compiledTokens / window, config.pressurePercentKnee, 1),
-    ramp(compiledTokens, config.pressureAbsoluteKnee, window)
+    ramp(pressureFraction, config.pressurePercentKnee, 1),
+    ramp(pressureTokens, config.pressureAbsoluteKnee, window)
   );
 
   const mostRecentIndex = metrics.reduce(
