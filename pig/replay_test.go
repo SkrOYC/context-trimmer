@@ -192,14 +192,16 @@ func replayConfig(in replayInput, config EvictionConfig, noTrim bool) replayMetr
 		toReplace := make(map[string]struct{})
 		if !noTrim {
 			toReplace = SelectEvictionCandidates(EvictionRequest{
-				Messages:          contextMessages,
-				ArchivesByPath:    state.archivesByPath,
-				ActiveArchives:    state.activeArchives,
-				Usage:             ContextUsage{ContextWindow: in.window, Tokens: &realTokens},
-				Cwd:               in.cwd,
-				AlreadyEvicted:    evicted,
-				Config:            config,
-				StalenessOverride: in.staleByPointer,
+				Messages:              contextMessages,
+				ArchivesByPath:        state.archivesByPath,
+				ActiveArchives:        state.activeArchives,
+				Usage:                 ContextUsage{ContextWindow: in.window, Tokens: &realTokens},
+				Cwd:                   in.cwd,
+				AlreadyEvicted:        evicted,
+				Config:                config,
+				StalenessOverride:     in.staleByPointer,
+				InputCostPerToken:     in.inputPrice,
+				CacheReadCostPerToken: in.cacheReadPrice,
 			})
 		}
 
@@ -357,6 +359,9 @@ func copySet(in map[string]struct{}) map[string]struct{} {
 }
 
 func configName(config EvictionConfig) string {
+	if config.AssumedRemainingTurns > 0 {
+		return fmt.Sprintf("netBenefit H=%d", config.AssumedRemainingTurns)
+	}
 	return fmt.Sprintf("thr=%.2f aff=%.2f batch=%d",
 		config.Threshold, config.Weights.Affordability, config.MinBatchTokens)
 }
@@ -384,6 +389,18 @@ func configGrid() []EvictionConfig {
 		config.Threshold = 0.3
 		config.MinBatchTokens = 0
 		return []EvictionConfig{config}
+	}
+	if os.Getenv("PIG_REPLAY_NET") != "" {
+		var out []EvictionConfig
+		for _, horizon := range []int{10, 25, 50, 100} {
+			for _, batch := range []int{0, 2000, 8000} {
+				config := DefaultEvictionConfig()
+				config.AssumedRemainingTurns = horizon
+				config.MinBatchTokens = batch
+				out = append(out, config)
+			}
+		}
+		return out
 	}
 	var out []EvictionConfig
 	for _, threshold := range []float64{0.1, 0.2, 0.3, 0.4, 0.5} {

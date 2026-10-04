@@ -47,6 +47,10 @@ type EvictionConfig struct {
 	Threshold float64
 	// Weights are the score shares.
 	Weights EvictionWeights
+	// AssumedRemainingTurns enables the net-benefit rule for still-valid content:
+	// evict only when the cache-read savings over that many turns exceed the
+	// one-time suffix-invalidation cost. 0 keeps the fixed score threshold.
+	AssumedRemainingTurns int
 }
 
 // DefaultEvictionConfig returns the principle-set defaults.
@@ -160,17 +164,36 @@ type EvictionRequest struct {
 	AlreadyEvicted    map[string]struct{}
 	Config            EvictionConfig
 	StalenessOverride map[string]bool
+	// InputCostPerToken and CacheReadCostPerToken drive the net-benefit rule.
+	InputCostPerToken     float64
+	CacheReadCostPerToken float64
+}
+
+func costRatio(request EvictionRequest) float64 {
+	if request.InputCostPerToken <= 0 || request.CacheReadCostPerToken <= 0 {
+		return 0
+	}
+	return request.InputCostPerToken / request.CacheReadCostPerToken
 }
 
 // collectEligible applies the cap: provably-dead content is always eligible;
 // still-valid content needs genuine pressure and a weighted score over the
 // threshold. The co-location pass then re-scores the suffix after the oldest
 // removal with affordability 1 (that suffix is a cache miss anyway).
-func collectEligible(candidates []candidate, pressure float64, config EvictionConfig) []candidate {
+func collectEligible(candidates []candidate, pressure float64, config EvictionConfig, compiledTokens int, ratio float64) []candidate {
 	underPressure := pressure > 0
+	useNetBenefit := config.AssumedRemainingTurns > 0 && ratio > 1
 	isEligible := func(c candidate, signals EvictionSignals) bool {
-		return c.provenDead ||
-			(underPressure && ScoreFromSignals(signals, config.Weights) >= config.Threshold)
+		if c.provenDead {
+			return true
+		}
+		if useNetBenefit {
+			// Net-benefit: cache-read savings over the assumed horizon versus the
+			// one-time cost of re-sending the invalidated suffix.
+			suffixTokens := (1 - signals.Affordability) * float64(compiledTokens)
+			return float64(c.savedTokens)*float64(config.AssumedRemainingTurns) > suffixTokens*(ratio-1)
+		}
+		return underPressure && ScoreFromSignals(signals, config.Weights) >= config.Threshold
 	}
 
 	firstRemovalIndex := 0
@@ -392,7 +415,7 @@ func SelectEvictionCandidates(request EvictionRequest) map[string]struct{} {
 		}))
 	}
 
-	eligible := collectEligible(candidates, pressure, request.Config)
+	eligible := collectEligible(candidates, pressure, request.Config, compiledTokens, costRatio(request))
 	if len(eligible) == 0 {
 		return evicted
 	}
