@@ -1,0 +1,12 @@
+name: pig-context-trimmer
+description: "Archive large tool results and replace stale or superseded content with compact pointers."
+extensions:
+  - name: pig
+    origins:
+      - local:./pig
+    tools:
+      - recall_result
+discovery:
+  skills:
+    - user
+    - workspace
