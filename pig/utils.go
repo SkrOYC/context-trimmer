@@ -29,6 +29,16 @@ func stringValue(value any) string {
 	return s
 }
 
+func boolValue(value any) bool {
+	b, _ := value.(bool)
+	return b
+}
+
+func mapValue(value any) map[string]any {
+	m, _ := value.(map[string]any)
+	return m
+}
+
 // numberValue coerces a decoded JSON number, tolerating the concrete numeric
 // types a non-wire caller might supply.
 func numberValue(value any) (float64, bool) {

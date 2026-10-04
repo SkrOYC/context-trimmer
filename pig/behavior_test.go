@@ -234,6 +234,33 @@ func TestBehaviorContextProtectsMostRecentArchive(t *testing.T) {
 	}
 }
 
+func TestBehaviorContextZeroWindowDoesNotEvict(t *testing.T) {
+	host := newHost(t, t.TempDir())
+	host.SetContextWindow(0)
+
+	big := strings.Repeat("w", 40_000)
+	if _, err := host.ToolResult(bashResult("tc1", "echo", big)); err != nil {
+		t.Fatalf("first bash result: %v", err)
+	}
+	if _, err := host.ToolResult(bashResult("tc2", "echo", big)); err != nil {
+		t.Fatalf("second bash result: %v", err)
+	}
+
+	result, err := host.Context([]any{
+		userMessage("1"),
+		toolResultMessage("tc1", "bash", big),
+		userMessage("2"),
+		toolResultMessage("tc2", "bash", big),
+	})
+	if err != nil {
+		t.Fatalf("context: %v", err)
+	}
+	updated, _ := result["messages"].([]any)
+	if got := contentText(updated[1].(map[string]any)); got != big {
+		t.Fatalf("an unknown (zero) context window must not evict; got %q", got)
+	}
+}
+
 func TestBehaviorEvictionIsAppendOnly(t *testing.T) {
 	host := newHost(t, t.TempDir())
 

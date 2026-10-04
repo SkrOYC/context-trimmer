@@ -34,16 +34,17 @@ func handleRecall(state *State, ctx sdk.Context, params map[string]any) (any, er
 		return errorToolResult("Error: Pointer "+pointerID+" not found in this branch.", "not_found"), nil
 	}
 
-	var blocks []map[string]any
-	if err := json.Unmarshal([]byte(arc.OriginalContent), &blocks); err != nil {
+	var parsed any
+	if err := json.Unmarshal([]byte(arc.OriginalContent), &parsed); err != nil {
 		return errorToolResult("Error recalling result: "+err.Error(), "error"), nil
 	}
 
 	if CheckStaleness(arc, ctx.Cwd()) {
+		blocks, _ := parsed.([]any)
 		parts := make([]string, len(blocks))
 		for i, block := range blocks {
-			if block["type"] == "text" {
-				parts[i] = stringValue(block["text"])
+			if object, ok := block.(map[string]any); ok && object["type"] == "text" {
+				parts[i] = stringValue(object["text"])
 			}
 		}
 		text := "<recalled-stale-content>\n" +
@@ -57,7 +58,7 @@ func handleRecall(state *State, ctx sdk.Context, params map[string]any) (any, er
 	}
 
 	return map[string]any{
-		"content": blocks,
+		"content": parsed,
 		"details": map[string]any{"status": "active"},
 	}, nil
 }

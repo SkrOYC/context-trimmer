@@ -25,11 +25,7 @@ func handleToolResult(state *State, ctx sdk.Context, data map[string]any) (any, 
 
 	state.Rebuild(ctx)
 
-	ev, err := decodeToolResultEvent(data)
-	if err != nil {
-		warnf("archive %s: decode event: %v", toolName, err)
-		return nil, nil
-	}
+	ev := decodeToolResultEvent(data)
 
 	content, ok := policy.ExtractContent(ev)
 	if !ok {
@@ -73,18 +69,6 @@ func handleToolResult(state *State, ctx sdk.Context, data map[string]any) (any, 
 	}
 	state.Register(arc)
 	return nil, nil
-}
-
-func decodeToolResultEvent(data map[string]any) (toolResultEvent, error) {
-	raw, err := json.Marshal(data)
-	if err != nil {
-		return toolResultEvent{}, err
-	}
-	var ev toolResultEvent
-	if err := json.Unmarshal(raw, &ev); err != nil {
-		return toolResultEvent{}, err
-	}
-	return ev, nil
 }
 
 // archiveStartLine mirrors the TypeScript `Number(input.offset) || 1`.

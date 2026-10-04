@@ -60,28 +60,74 @@ type LineRange struct {
 
 // contentBlock is a text or image block of a tool result.
 type contentBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type string
+	Text string
 }
 
 // truncation mirrors the `details.truncation` object archive-eligible tools add
 // when they cut a result short.
 type truncation struct {
-	Content               string `json:"content"`
-	FirstLineExceedsLimit bool   `json:"firstLineExceedsLimit"`
+	Content               string
+	FirstLineExceedsLimit bool
 }
 
-// toolResultEvent is the decoded tool_result payload. Only the fields the
-// archiver needs are kept.
+// toolResultEvent is the archive-relevant slice of a tool_result payload.
 type toolResultEvent struct {
-	ToolName   string         `json:"toolName"`
-	ToolCallID string         `json:"toolCallId"`
-	Input      map[string]any `json:"input"`
-	Content    []contentBlock `json:"content"`
-	Details    struct {
-		Truncation *truncation `json:"truncation"`
-	} `json:"details"`
-	IsError bool `json:"isError"`
+	ToolName   string
+	ToolCallID string
+	Input      map[string]any
+	Content    []contentBlock
+	Details    toolResultDetails
+	IsError    bool
+}
+
+type toolResultDetails struct {
+	Truncation *truncation
+}
+
+// decodeToolResultEvent reads the fields the archiver needs straight from the
+// decoded payload. It tolerates a non-object details/input instead of failing
+// the whole result the way a strict struct decode would.
+func decodeToolResultEvent(data map[string]any) toolResultEvent {
+	return toolResultEvent{
+		ToolName:   stringValue(data["toolName"]),
+		ToolCallID: stringValue(data["toolCallId"]),
+		Input:      mapValue(data["input"]),
+		Content:    contentBlocksValue(data["content"]),
+		Details:    toolResultDetails{Truncation: truncationValue(data["details"])},
+		IsError:    boolValue(data["isError"]),
+	}
+}
+
+func contentBlocksValue(value any) []contentBlock {
+	items, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	blocks := make([]contentBlock, len(items))
+	for i, item := range items {
+		block, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		blocks[i] = contentBlock{Type: stringValue(block["type"]), Text: stringValue(block["text"])}
+	}
+	return blocks
+}
+
+func truncationValue(value any) *truncation {
+	details, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	raw, ok := details["truncation"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	return &truncation{
+		Content:               stringValue(raw["content"]),
+		FirstLineExceedsLimit: boolValue(raw["firstLineExceedsLimit"]),
+	}
 }
 
 // ToolPolicy is one row of the archiving policy table: which tools are archived,
@@ -173,6 +219,12 @@ func getFindParameterKey(input map[string]any) (string, bool) {
 func getLsParameterKey(input map[string]any) (string, bool) {
 	if path, ok := input["path"].(string); ok {
 		return path, true
+	}
+	// A nil input mirrors the TypeScript null-guarded `.path` throw, which the
+	// archive handler's catch turns into a skip; a present-but-pathless map
+	// still resolves to ".".
+	if input == nil {
+		return "", false
 	}
 	return ".", true
 }
