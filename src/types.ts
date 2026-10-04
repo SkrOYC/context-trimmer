@@ -2,7 +2,7 @@ import type {
   ToolResultEvent,
   TruncationResult,
 } from "@earendil-works/pi-coding-agent";
-import { stripReadFooters } from "./utils";
+import { isOversizedLineWarning, stripReadFooters } from "./utils";
 
 export const ARCHIVE_TYPE = "results-archive";
 
@@ -141,7 +141,13 @@ function extractReadContent(event: ToolResultEvent): string | undefined {
     return truncation.content;
   }
 
-  return stripReadFooters(joinTextContent(event));
+  const text = joinTextContent(event);
+  // Persisted results strip `details`, so recover the oversized-line skip from
+  // the warning text itself.
+  if (isOversizedLineWarning(text)) {
+    return;
+  }
+  return stripReadFooters(text);
 }
 
 export const POLICIES: ToolPolicy[] = [

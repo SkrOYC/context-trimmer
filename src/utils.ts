@@ -40,12 +40,20 @@ export function getMessageText(message: AgentMessage): string {
 }
 
 // Footer patterns added by pi's read tool when more content exists beyond what was returned.
+const OVERSIZED_LINE_WARNING_PATTERN =
+  /^\[Line \d+ is [\d.]+[KMGT]?B, exceeds \d+(?:\.\d+)?[KMGT]?B limit\. Use bash: .*]$/;
 const READ_FOOTER_PATTERNS = [
   /^\[\d+ more lines in file\. Use offset=\d+ to continue\.]$/,
   /^\[Showing lines \d+-\d+ of \d+\. Use offset=\d+ to continue\.]$/,
   /^\[Showing lines \d+-\d+ of \d+ \(\d+(?:\.\d+)?[KMGT]?B limit\)\. Use offset=\d+ to continue\.]$/,
-  /^\[Line \d+ is [\d.]+[KMGT]?B, exceeds \d+(?:\.\d+)?[KMGT]?B limit\. Use bash: .*]$/,
+  OVERSIZED_LINE_WARNING_PATTERN,
 ];
+
+// Whether text is the read tool's single-line "too large to return" warning
+// rather than file content.
+export function isOversizedLineWarning(text: string): boolean {
+  return OVERSIZED_LINE_WARNING_PATTERN.test(text.trim());
+}
 
 export function stripReadFooters(text: string): string {
   const parts = text.split("\n\n");

@@ -12,6 +12,7 @@ import {
   ModelRegistry,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
+import { createArchiveState } from "../src/state";
 
 describe("Pi Context Trimmer Extension", () => {
   let tempDir: string;
@@ -156,6 +157,73 @@ describe("Pi Context Trimmer Extension", () => {
   function firstText(messages: AgentMessage[]): string {
     return ((messages[0] as any)?.content?.[0] as { text: string }).text;
   }
+
+  it("backfills archives for tool results that predate the extension", () => {
+    const state = createArchiveState();
+    const body = "0123456789abcdefghij\n".repeat(2000);
+    const args = { limit: 2000, offset: 1, path: "big.txt" };
+    const branch = [
+      {
+        id: "a1",
+        message: {
+          content: [
+            { arguments: args, id: "tc1", name: "read", type: "toolCall" },
+          ],
+          role: "assistant",
+        },
+        type: "message",
+      },
+      {
+        id: "r1",
+        message: {
+          content: [{ text: body, type: "text" }],
+          isError: false,
+          role: "toolResult",
+          timestamp: 1,
+          toolCallId: "tc1",
+          toolName: "read",
+        },
+        type: "message",
+      },
+      {
+        id: "a2",
+        message: {
+          content: [
+            { arguments: args, id: "tc2", name: "read", type: "toolCall" },
+          ],
+          role: "assistant",
+        },
+        type: "message",
+      },
+      {
+        id: "r2",
+        message: {
+          content: [{ text: body, type: "text" }],
+          isError: false,
+          role: "toolResult",
+          timestamp: 2,
+          toolCallId: "tc2",
+          toolName: "read",
+        },
+        type: "message",
+      },
+    ];
+    const ctx = { sessionManager: { getBranch: () => branch } } as any;
+
+    state.rebuildState(ctx);
+    const first = [...state.activeArchives.values()]
+      .map((arc) => arc.pointerId)
+      .sort((a, b) => a.localeCompare(b));
+
+    state.rebuildState(ctx);
+    const second = [...state.activeArchives.values()]
+      .map((arc) => arc.pointerId)
+      .sort((a, b) => a.localeCompare(b));
+
+    expect(state.activeArchives.size).toBe(2);
+    expect(state.archivesByPath.get("read:big.txt")).toHaveLength(2);
+    expect(second).toEqual(first);
+  });
 
   it("should load the context trimmer extension and initialize recall_result tool", async () => {
     const { result } = await loadExtension();

@@ -67,6 +67,10 @@ possible so a long agent session stays sharp and survives.
   recently archived result is always protected.
 - **On-demand recall** — a `recall_result` tool returns the original content,
   wrapping it when the source has since gone stale.
+- **Retroactive backfill** — loaded into a session that predates it, it archives
+  the old tool results it never saw (pairing each with its tool call's
+  arguments), so the session is trimmed as if the extension had been active from
+  the start. Backfilled archives are derived and cached, never re-hashed per turn.
 - **Two host implementations** — TypeScript and Go, with identical behavior.
 
 ### Supported tools
