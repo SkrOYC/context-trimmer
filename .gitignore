@@ -1,3 +1,11 @@
+# devenv
+.devenv
+.direnv
+
+# go workspace (pins the local PiG SDK; machine-specific)
+go.work
+go.work.sum
+
 # dependencies (bun install)
 node_modules
 

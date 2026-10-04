@@ -119,6 +119,41 @@ The model can call `recall_result` with a `pointer_id`:
 </recalled-stale-content>
 ```
 
+## PiG-native Go extension
+
+The same trimmer is also available as a PiG-native Go extension under
+[`pig/`](./pig). It is a from-scratch port, not a Node-compat shim, and keeps the
+same archive schema, eviction signals, thresholds, and per-tool policies.
+
+- **Layout**: `pig/` is a self-contained Go module with one file per original
+  module (`types.go`, `utils.go`, `state.go`, `archive.go`, `context.go`,
+  `supersession.go`, `eviction.go`, `recall.go`, `extension.go`).
+- **PiG-native details**: it rebuilds state through
+  `SessionManager().GetBranch(nil)` (the typed branch drops `customType`/`data`),
+  returns a fresh message list on `context` while leaving untouched messages
+  identical, and guards shared state with a mutex because PiG runs handlers on
+  separate goroutines.
+- **Tuning knobs**: `DefaultEvictionConfig()` holds the same weights and knees as
+  `DEFAULT_EVICTION_CONFIG` in `src/eviction.ts`.
+
+### Build and test
+
+```bash
+cd pig
+go build ./...
+go test ./...                              # behavior tests, no model required
+pig install ./pig --validate-only --json   # run from the repo root
+```
+
+The behavior tests in `pig/behavior_test.go` drive the real handlers and tool
+over PiG's subprocess protocol with a fake host (`pig/internal/hosttest`), so no
+model or live session is needed. A live smoke run is:
+
+```bash
+pig --print -ne -nc -e ./pig --model <model> -- \
+  "Read /path/to/file with the read tool, then read it again."
+```
+
 ## Installation
 
 Install as a pi package or load directly:
