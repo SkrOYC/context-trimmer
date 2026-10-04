@@ -152,7 +152,7 @@ func getGrepParameterKey(input map[string]any) (string, bool) {
 	if literal, ok := input["literal"].(bool); ok && literal {
 		parts = append(parts, "literal")
 	}
-	if context, ok := input["context"].(float64); ok {
+	if context, ok := numberValue(input["context"]); ok {
 		parts = append(parts, "context="+strconv.FormatFloat(context, 'f', -1, 64))
 	}
 	return strings.Join(parts, "|"), true

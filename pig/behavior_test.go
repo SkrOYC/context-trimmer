@@ -299,6 +299,31 @@ func TestBehaviorRecallReturnsActiveContent(t *testing.T) {
 	}
 }
 
+func TestBehaviorRecallPreservesAllContentFields(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("hi"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	host := newHost(t, dir)
+
+	payload := readResult("tc1", "f.txt", "hi")
+	payload["content"] = []any{map[string]any{"type": "text", "text": "hi", "extra": "keep"}}
+	if _, err := host.ToolResult(payload); err != nil {
+		t.Fatalf("tool_result: %v", err)
+	}
+	arc := archiveData(t, host.Entries()[0])
+
+	result, err := host.CallTool("recall_result", "call-1", map[string]any{"pointer_id": arc.PointerID})
+	if err != nil {
+		t.Fatalf("recall: %v", err)
+	}
+	content, _ := result["content"].([]any)
+	block := content[0].(map[string]any)
+	if block["extra"] != "keep" {
+		t.Fatalf("recall dropped an unknown content field: %v", block)
+	}
+}
+
 func TestBehaviorRecallWrapsStaleContent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.txt")

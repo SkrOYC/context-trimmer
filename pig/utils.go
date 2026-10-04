@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -21,6 +22,31 @@ const approxCharsPerToken = 4
 func GetHash(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
+}
+
+func stringValue(value any) string {
+	s, _ := value.(string)
+	return s
+}
+
+// numberValue coerces a decoded JSON number, tolerating the concrete numeric
+// types a non-wire caller might supply.
+func numberValue(value any) (float64, bool) {
+	switch n := value.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case json.Number:
+		f, err := n.Float64()
+		return f, err == nil
+	default:
+		return 0, false
+	}
 }
 
 const pointerAlphabet = "0123456789abcdefghijklmnopqrstuvwxyz"

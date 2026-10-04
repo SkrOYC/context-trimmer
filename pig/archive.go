@@ -89,7 +89,7 @@ func decodeToolResultEvent(data map[string]any) (toolResultEvent, error) {
 
 // archiveStartLine mirrors the TypeScript `Number(input.offset) || 1`.
 func archiveStartLine(input map[string]any) int {
-	if offset, ok := input["offset"].(float64); ok && offset != 0 {
+	if offset, ok := numberValue(input["offset"]); ok && offset != 0 {
 		return int(offset)
 	}
 	return 1

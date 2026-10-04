@@ -15,11 +15,11 @@ func handleContext(state *State, ctx sdk.Context, data map[string]any) (any, err
 
 	snapshot := state.Snapshot(ctx)
 
-	messages := make([]map[string]any, 0, len(rawMessages))
-	for _, raw := range rawMessages {
-		if message, ok := raw.(map[string]any); ok {
-			messages = append(messages, message)
-		}
+	// Keep one slot per raw message so eviction indices line up with the list the
+	// replacement loop iterates; a non-object entry is a zero-token message.
+	messages := make([]map[string]any, len(rawMessages))
+	for i, raw := range rawMessages {
+		messages[i], _ = raw.(map[string]any)
 	}
 
 	toReplace := SelectEvictionCandidates(EvictionRequest{
@@ -35,8 +35,17 @@ func handleContext(state *State, ctx sdk.Context, data map[string]any) (any, err
 		state.MarkEvicted(toReplace)
 	}
 
-	archiveByToolCallID := make(map[string]ArchivedResult, len(snapshot.ActiveArchives))
-	for _, arc := range snapshot.ActiveArchives {
+	// Union with the live set so a pointer evicted by a concurrent context pass
+	// is still stubbed in this response.
+	evicted := state.EvictedPointers()
+	for pointerID := range toReplace {
+		evicted[pointerID] = struct{}{}
+	}
+
+	// Build the tool-call reverse index in registration order so a duplicate
+	// toolCallId resolves to the last-registered archive deterministically.
+	archiveByToolCallID := make(map[string]ArchivedResult, len(snapshot.Ordered))
+	for _, arc := range snapshot.Ordered {
 		archiveByToolCallID[arc.ToolCallID] = arc
 	}
 
@@ -53,7 +62,7 @@ func handleContext(state *State, ctx sdk.Context, data map[string]any) (any, err
 			updated[i] = raw
 			continue
 		}
-		if _, replace := toReplace[arc.PointerID]; !replace {
+		if _, replace := evicted[arc.PointerID]; !replace {
 			updated[i] = raw
 			continue
 		}
