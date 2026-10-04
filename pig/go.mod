@@ -1,4 +1,4 @@
-module github.com/oscar/pi-context-trimmer/pig
+module github.com/SkrOYC/context-trimmer/pig
 
 go 1.26
 

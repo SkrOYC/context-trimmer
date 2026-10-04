@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/oscar/pi-context-trimmer/pig/internal/hosttest"
+	"github.com/SkrOYC/context-trimmer/pig/internal/hosttest"
 )
 
 func newHost(t *testing.T, cwd string) *hosttest.Host {

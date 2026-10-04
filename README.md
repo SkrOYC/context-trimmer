@@ -1,24 +1,37 @@
-# Pi Context Trimmer
+# context-trimmer
 
-A Pi extension that archives large tool results and replaces them with compact virtual pointers when they become stale or redundant, reducing context bloat while preserving the ability to recall original content on demand.
+> Lossless context trimming for long-running AI coding agents: archive large tool results, then replace the stale or superseded ones with compact, recallable pointers.
 
-## What It Does
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white)
+![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)
 
-For every supported tool result, this extension:
+**context-trimmer** keeps an agent's working context small without losing
+information. Rather than lossy summarization, it archives every large tool
+result verbatim, replaces the ones that are stale or superseded with a one-line
+pointer, and exposes a `recall_result` tool so the agent can pull the original
+back on demand.
 
-1. **Archives** the result as a custom `results-archive` entry in the session JSONL
-2. **Computes SHA-256 hashes** for each line that was actually returned
-3. **Leaves the raw result in the current turn** so the model can use it immediately
-4. On later turns, replaces archived content in context with a compact pointer when it is **stale or superseded**
-5. Exposes a `recall_result` tool so the model can retrieve archived content later
+The repository ships two reference implementations of the same design: a
+**TypeScript** extension for the Pi coding agent (`src/`) and a **Go** extension
+for the PiG coding agent (`pig/`). Both share the same archive schema, eviction
+signals, thresholds, and per-tool policies.
 
-### Supported tools
+## Table of Contents
 
-- **`read`**: full line-hash staleness checks + line-range supersession (newer reads of the same file can cover older reads)
-- **`bash`**: archived by exact command; newer runs of the same command supersede older ones; treated as immutable/stale on recall
-- **`grep`**: archived by `pattern|path|glob|ignoreCase|literal|context`; newer identical searches supersede older ones; immutable on recall
-- **`find`**: archived by `pattern|path`; newer identical searches supersede older ones; immutable on recall
-- **`ls`**: archived by `path`; newer listings of the same directory supersede older ones; immutable on recall
+- [Why](#why)
+- [Features](#features)
+- [How it works](#how-it-works)
+- [Implementations](#implementations)
+- [Getting started](#getting-started)
+- [Configuration and tuning](#configuration-and-tuning)
+- [Data schema](#data-schema)
+- [Benchmark](#benchmark)
+- [Repository layout](#repository-layout)
+- [Development](#development)
+- [Limitations](#limitations)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## Why
 
@@ -38,77 +51,96 @@ possible so a long agent session stays sharp and survives.
   trimming is never free and must be done in rare, decisive batches — never a
   little every turn.
 
-## How It Works
+## Features
 
-### 1. Tool result interception (`tool_result` event)
+- **Verbatim archiving** — every supported tool result is stored whole; nothing
+  is summarized away.
+- **Staleness detection** — file-backed results (`read`) are re-hashed against
+  disk; command-like results (`bash`/`grep`/`find`/`ls`) are treated as
+  immutable and assumed stale.
+- **Supersession** — a newer read of the same file range, or a newer run of the
+  same command/search, supersedes the older result.
+- **Principled eviction** — proven-dead content evicts freely; still-valid
+  content is only trimmed under genuine context pressure and above a weighted
+  score threshold.
+- **KV-cache discipline** — removals are batched and append-only, and the most
+  recently archived result is always protected.
+- **On-demand recall** — a `recall_result` tool returns the original content,
+  wrapping it when the source has since gone stale.
+- **Two host implementations** — TypeScript and Go, with identical behavior.
 
-For every supported tool result:
+### Supported tools
 
-- The extension uses a per-tool policy to determine what content to archive and how to identify it.
-- For `read` results it determines the actual file content returned:
-  - Prefer `details.truncation.content` when the read tool provides it
-  - Otherwise strip the read-tool continuation footer from the raw text (e.g. `[7 more lines in file. Use offset=8 to continue.]`)
-  - If `details.truncation.firstLineExceedsLimit` is true, no actual file content was returned, so nothing is archived
-- It splits the content on `"\n"` (matching pi's read tool) and hashes each line
-- It stores an archive record with:
-  - `pointerId`: the virtual pointer ID
-  - `toolName`, `toolCallId`: identifying metadata
-  - `parameterKey`: the resolved identifier for the tool invocation (e.g. file path, command string, search query)
-  - `stalenessStrategy`: how staleness is determined (`file-lines` or `immutable`)
-  - `supersessionStrategy`: how newer results can replace older ones (`line-range`, `exact-key`, or `none`)
-  - `startLine`: the 1-indexed offset from the read input
-  - `lineHashes`: SHA-256 hashes of each returned line
-  - `originalContent`: the original tool result content (preserved verbatim for recall)
+| Tool | Archive key | Staleness | Supersession |
+|---|---|---|---|
+| `read` | file path | re-hash archived lines on disk | line-range overlap |
+| `bash` | command | immutable (assumed stale) | exact key |
+| `grep` | `pattern\|path\|glob\|ignoreCase\|literal\|context` | immutable | exact key |
+| `find` | `pattern\|path` | immutable | exact key |
+| `ls` | path | immutable | exact key |
 
-### 2. Context compilation (`context` event)
+## How it works
 
-Before each LLM call, the extension scans `toolResult` messages for archived results:
+### 1. Archive (`tool_result`)
 
-- It groups archives by tool and parameter key
-- For `read` archives it reads the current file from disk and re-hashes the same line range
-Each archived result gets a single normalized **eviction score** in `[0, 1]` — a
-weighted sum of signals, where each weight is that signal's *share* of the total
-(the weights sum to 1). The signals:
+For every supported, successful tool result:
+
+1. A per-tool policy decides what content to archive and how to identify the
+   invocation.
+2. For `read`, the actual file content is recovered: prefer
+   `details.truncation.content` when the host provides it, otherwise strip the
+   read-tool continuation footer (for example
+   `[7 more lines in file. Use offset=8 to continue.]`). If the read was
+   truncated to a single oversized line, no file content was returned and
+   nothing is archived.
+3. The content is split on `"\n"` and every line is SHA-256 hashed.
+4. An archive record is appended to the session as a custom
+   `results-archive` entry.
+
+The fresh result stays verbatim in the turn it lands, so the model can use it
+immediately.
+
+### 2. Evict (`context`)
+
+Before each model call, the extension scans the compiled `toolResult` messages
+for archived results. Each archived result receives a single normalized
+**eviction score** in `[0, 1]` — a weighted sum of signals, where each weight is
+that signal's *share* of the total (the weights sum to 1):
 
 - **Supersession** — a newer result of the same tool/parameter group covers this
-  one (line-range for `read`, exact-key for `bash`/`grep`/`find`/`ls`)
+  one (line-range for `read`, exact-key for `bash`/`grep`/`find`/`ls`).
 - **Staleness** — confidence-weighted: a `read` whose file changed on disk is
-  *proven* stale (1.0); immutable tools can only be *assumed* stale (discounted)
-- **Pressure** — rises as the compiled context crosses a percent / absolute-token
-  knee; shared by every candidate that turn
-- **Coldness** and **Size** — older, larger archives are more disposable ballast
-- **Semantic** — per-tool disposability (reads are the most valuable to keep)
+  *proven* stale (1.0); immutable tools can only be *assumed* stale (discounted).
+- **Pressure** — rises as the compiled context crosses a percent or absolute
+  token knee; shared by every candidate that turn.
+- **Coldness** and **Size** — older, larger archives are more disposable.
+- **Semantic** — per-tool disposability (reads are the most valuable to keep).
 - **Affordability** — the KV-cache counterweight: content whose removal
   invalidates a long suffix scores *lower* (expensive to evict). Its
   **co-location bump** sets affordability to 1 for anything already inside a
-  suffix we're invalidating anyway.
+  suffix we are invalidating anyway.
 
 Two rules gate what the score is allowed to do:
 
 - **Proven-dead content evicts freely**, independent of pressure: a fully
-  superseded archive or a proven-stale read is wrong-to-keep *and* dumb-zone
+  superseded archive or a proven-stale read is wrong to keep *and* dumb-zone
   ballast, so it goes.
 - **Still-valid content is capped**: it is only trimmed once there is genuine
-  pressure *and* its score clears the threshold — so good content is never
-  thrown away early.
+  pressure *and* its score clears the threshold, so good content is never thrown
+  away early.
 
 Removals are **batched**: held until they would free at least `minBatchTokens`
 (or the overflow guard trips), so eviction is a few large, amortized KV-cache
 invalidations rather than a trickle. Eviction is **append-only** — once a pointer
 replaces a result it stays replaced — and the **most recently archived result is
-always protected** so a fresh result is usable verbatim on the turn it lands.
+always protected**, so a fresh result is usable verbatim on the turn it lands.
 
-The aggressiveness knobs (threshold, pressure knees, batch size) are set by
-principle; the signal weights and per-tool semantics are tuned by
-`benchmark/optimize.ts`. The same `selectEvictionCandidates` runs in production
-and in every test — there is no test-only parameterization.
-
-### 3. On-demand recall (`recall_result` tool)
+### 3. Recall (`recall_result`)
 
 The model can call `recall_result` with a `pointer_id`:
 
-- **Active**: returns the original content as-is
-- **Stale**: returns the original content wrapped in XML:
+- **Active** — returns the original content verbatim.
+- **Stale** — returns the original content wrapped in XML:
 
 ```xml
 <recalled-stale-content>
@@ -119,24 +151,36 @@ The model can call `recall_result` with a `pointer_id`:
 </recalled-stale-content>
 ```
 
-## PiG-native Go extension
+## Implementations
 
-The same trimmer is also available as a PiG-native Go extension under
-[`pig/`](./pig). It is a from-scratch port, not a Node-compat shim, and keeps the
-same archive schema, eviction signals, thresholds, and per-tool policies.
+| | TypeScript | Go |
+|---|---|---|
+| Directory | `src/` | `pig/` |
+| Host | Pi | PiG |
+| Runtime | Node-compatible extension | PiG-native subprocess extension |
+| Tests | `bun test` | `go test ./...` |
 
-- **Layout**: `pig/` is a self-contained Go module with one file per original
-  module (`types.go`, `utils.go`, `state.go`, `archive.go`, `context.go`,
-  `supersession.go`, `eviction.go`, `recall.go`, `extension.go`).
-- **PiG-native details**: it rebuilds state through
-  `SessionManager().GetBranch(nil)` (the typed branch drops `customType`/`data`),
-  returns a fresh message list on `context` while leaving untouched messages
-  identical, and guards shared state with a mutex because PiG runs handlers on
-  separate goroutines.
-- **Tuning knobs**: `DefaultEvictionConfig()` holds the same weights and knees as
-  `DEFAULT_EVICTION_CONFIG` in `src/eviction.ts`.
+The Go implementation is a from-scratch port, not a compatibility shim. It keeps
+the same archive schema, eviction signals, thresholds, and per-tool policies,
+adapting only the host integration (state rebuild, context mutation, and
+concurrency).
 
-### Build and test
+## Getting started
+
+### TypeScript (Pi)
+
+```bash
+bun install
+bun test
+
+# Load it directly:
+cp src/index.ts ~/.pi/agent/extensions/context-trimmer.ts
+
+# Or reference it in ~/.pi/agent/settings.json:
+# { "extensions": ["/path/to/context-trimmer/src/index.ts"] }
+```
+
+### Go (PiG)
 
 ```bash
 cd pig
@@ -145,39 +189,31 @@ go test ./...                              # behavior tests, no model required
 pig install ./pig --validate-only --json   # run from the repo root
 ```
 
-The behavior tests in `pig/behavior_test.go` drive the real handlers and tool
-over PiG's subprocess protocol with a fake host (`pig/internal/hosttest`), so no
-model or live session is needed. A live smoke run is:
+Load it directly, or through the included Piglet:
 
 ```bash
-pig --print -ne -nc -e ./pig --model <model> -- \
-  "Read /path/to/file with the read tool, then read it again."
+pig -e ./pig --model <model> -- "Read /path/to/file, then read it again."
+pig --piglet ./piglet.yaml
 ```
 
-## Installation
+The behavior tests in `pig/behavior_test.go` drive the real handlers and the
+`recall_result` tool over PiG's subprocess protocol with a fake host
+(`pig/internal/hosttest`), so they need no model and no live session.
 
-Install as a pi package or load directly:
+## Configuration and tuning
 
-```bash
-# Auto-discovery: place in ~/.pi/agent/extensions/
-cp src/index.ts ~/.pi/agent/extensions/pi-context-trimmer.ts
+The aggressiveness knobs (threshold, pressure knees, batch size) are set by
+principle, not fit to a benchmark; the signal weights and per-tool semantics are
+the tunable surface.
 
-# Or load explicitly in ~/.pi/agent/settings.json
-{
-  "extensions": ["/path/to/pi-context-trimmer/src/index.ts"]
-}
-```
+- TypeScript: `DEFAULT_EVICTION_CONFIG` in `src/eviction.ts`.
+- Go: `DefaultEvictionConfig()` in `pig/eviction.go`.
 
-## Development
+Both hold the same weights, knees, and per-tool semantics.
 
-```bash
-bun install
-bun test
-```
+## Data schema
 
-## Data Schema
-
-Custom session entries of type `"results-archive"`:
+Archives are stored as custom session entries of type `"results-archive"`:
 
 ```typescript
 interface ArchivedResult {
@@ -196,9 +232,9 @@ interface ArchivedResult {
 
 ## Benchmark
 
-A public-trace benchmark harness is included under `benchmark/`. It replays
-agent trajectories through the trimmer's eviction logic and compares the
-current algorithm against baselines using real model prices from
+A public-trace benchmark harness lives under `benchmark/` (TypeScript). It
+replays agent trajectories through the trimmer's eviction logic and compares the
+algorithm against baselines using real model prices from
 [models.dev](https://models.dev) (opencode-go provider).
 
 ```bash
@@ -218,7 +254,7 @@ exercise eviction) measures:
 - **Mean context usage** — average compiled context as a share of the window;
   the dumb-zone cost we minimize.
 - **Window overflow tokens** — a hard constraint: any config that overflows is
-  infeasible (those turns force compaction / request failure).
+  infeasible (those turns force compaction or request failure).
 - **Invalidation events** — turns on which a new mid-context replacement rewrote
   the KV-cache suffix; the anti-thrash metric (few, large batches = low).
 - **Real dollar cost** — cache-aware per-turn spend plus a parameterized recall
@@ -237,8 +273,58 @@ Two findings, reported honestly:
    Production keeps every Toolathlon turn inside the window (0 overflow) with
    ~0.6 invalidation events per trace (no thrash).
 
+## Repository layout
+
+```text
+src/          TypeScript implementation (Pi)
+pig/          Go implementation (PiG)
+benchmark/    Public-trace benchmark harness (TypeScript)
+docs/         Design and porting notes
+test/         TypeScript tests
+piglet.yaml   PiG Piglet that activates the Go extension
+```
+
+## Development
+
+TypeScript:
+
+```bash
+bun install
+bun test
+bun run check
+bun run fix
+```
+
+Go (toolchain via devenv):
+
+```bash
+cd pig
+gofmt -l .
+go vet ./...
+go test ./...
+```
+
 ## Limitations
 
-- Only text content is hashed and tracked
-- Footer stripping relies on the read-tool footer formats used by pi today
-- Non-`read` tools are treated as immutable/stale on recall (their output is not re-executed to verify freshness)
+- Only text content is hashed and tracked.
+- Footer stripping relies on the read-tool footer formats used by the host
+  today.
+- Non-`read` tools are treated as immutable/stale on recall: their output is not
+  re-executed to verify freshness.
+
+## Contributing
+
+Issues and pull requests are welcome. Before opening a pull request, run the
+checks for the implementation you touched:
+
+```bash
+bun test && bun run check    # TypeScript
+cd pig && gofmt -l . && go vet ./... && go test ./...   # Go
+```
+
+Keep the two implementations behaviorally identical; the Go behavior tests are
+the reference for parity.
+
+## License
+
+Released under the [MIT License](LICENSE).
