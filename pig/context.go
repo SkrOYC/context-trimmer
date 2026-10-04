@@ -1,6 +1,8 @@
 package pig
 
 import (
+	"os"
+
 	sdk "github.com/MichaelKinsy/PiG/extensions/sdk"
 )
 
@@ -22,11 +24,12 @@ func handleContext(state *State, ctx sdk.Context, data map[string]any) (any, err
 		messages[i], _ = raw.(map[string]any)
 	}
 
+	usage := getEvictionContext(ctx)
 	toReplace := SelectEvictionCandidates(EvictionRequest{
 		Messages:       messages,
 		ArchivesByPath: snapshot.ArchivesByPath,
 		ActiveArchives: snapshot.ActiveArchives,
-		Usage:          getEvictionContext(ctx),
+		Usage:          usage,
 		Cwd:            ctx.Cwd(),
 		AlreadyEvicted: snapshot.EvictedPointers,
 		Config:         DefaultEvictionConfig(),
@@ -40,6 +43,10 @@ func handleContext(state *State, ctx sdk.Context, data map[string]any) (any, err
 	evicted := state.EvictedPointers()
 	for pointerID := range toReplace {
 		evicted[pointerID] = struct{}{}
+	}
+
+	if dumpPath := os.Getenv("PIG_TRIMMER_DUMP"); dumpPath != "" {
+		dumpCompiledContext(dumpPath, usage, messages, snapshot, evicted)
 	}
 
 	// Build the tool-call reverse index in registration order so a duplicate
