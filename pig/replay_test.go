@@ -28,6 +28,7 @@ type replayMetrics struct {
 	savedTokens       int
 	invalidations     int
 	invalidatedTokens int
+	overflowTurns     int
 	contextCost       float64
 	baselineCost      float64
 	netSavings        float64
@@ -59,35 +60,51 @@ func TestReplaySweep(t *testing.T) {
 		t.Skip("set PIG_REPLAY_FIXTURE or PI_SESSION_FILE")
 	}
 	cwd := "/home/oscar/GitHub/pi-context-trimmer"
-	window := 1_000_000
 
 	branch := loadBranch(t, fixture)
-	input := buildReplayInput(branch, cwd, window)
-	if len(input.points) == 0 {
+	base := buildReplayInput(branch, cwd)
+	if len(base.points) == 0 {
 		t.Skip("no provider turns in fixture")
 	}
 
-	baseline := replayConfig(input, DefaultEvictionConfig(), true)
-	baseline.config = "baseline (no trim)"
+	for _, window := range []int{200_000, 300_000, 500_000, 750_000, 1_000_000} {
+		input := base
+		input.window = window
 
-	results := []replayMetrics{baseline}
-	for _, cfg := range configGrid() {
-		results = append(results, replayConfig(input, cfg, false))
-	}
-	sort.SliceStable(results, func(i, j int) bool {
-		return results[i].netSavings > results[j].netSavings
-	})
+		baseline := replayConfig(input, DefaultEvictionConfig(), true)
+		baseline.config = "no-trim"
 
-	fmt.Printf("\n%-34s %10s %10s %9s %6s %10s %10s %9s %9s\n",
-		"config", "untrim", "compiled", "saved", "inval", "invalTok", "netSave$", "deadTok", "validTok")
-	for _, r := range results {
-		fmt.Printf("%-34s %10d %10d %9d %6d %10d %10.4f %9d %9d\n",
-			r.config, r.untrimmedTokens, r.compiledTokens, r.savedTokens,
-			r.invalidations, r.invalidatedTokens, r.netSavings, r.deadSavedTokens, r.validSavedTokens)
+		results := []replayMetrics{baseline}
+		for _, cfg := range configGrid() {
+			results = append(results, replayConfig(input, cfg, false))
+		}
+		sort.SliceStable(results, func(i, j int) bool {
+			return results[i].netSavings > results[j].netSavings
+		})
+
+		fmt.Printf("\n===== window = %d (peak real ctx %d, overflow turns in baseline %d) =====\n",
+			window, peakRealTokens(input), baseline.overflowTurns)
+		fmt.Printf("%-26s %9s %9s %6s %10s %10s %9s %9s\n",
+			"config", "savedTok", "inval", "ovf", "invalTok", "netSave$", "deadTok", "validTok")
+		for _, r := range results {
+			fmt.Printf("%-26s %9d %9d %6d %10d %10.4f %9d %9d\n",
+				r.config, r.savedTokens, r.invalidations, r.overflowTurns,
+				r.invalidatedTokens, r.netSavings, r.deadSavedTokens, r.validSavedTokens)
+		}
 	}
 }
 
-func buildReplayInput(branch []map[string]any, cwd string, window int) replayInput {
+func peakRealTokens(in replayInput) int {
+	peak := 0
+	for _, tokens := range in.realTokens {
+		if tokens > peak {
+			peak = tokens
+		}
+	}
+	return peak
+}
+
+func buildReplayInput(branch []map[string]any, cwd string) replayInput {
 	messages := make([]map[string]any, 0, len(branch))
 	points := make([]int, 0)
 	prefixEnds := make([]int, 0)
@@ -133,12 +150,11 @@ func buildReplayInput(branch []map[string]any, cwd string, window int) replayInp
 		realTokens: realTokens,
 		msgChars:   msgChars, msgCharPrefix: msgCharPrefix,
 		dead: dead, contentChars: contentChars, pointerForToolCall: pointerForToolCall,
-		cwd: cwd, window: window,
+		cwd: cwd,
 	}
 }
 
 func replayConfig(in replayInput, config EvictionConfig, noTrim bool) replayMetrics {
-	debug := os.Getenv("PIG_REPLAY_DEBUG") != ""
 	m := replayMetrics{config: configName(config)}
 	state := NewState()
 	evicted := make(map[string]struct{})
@@ -150,6 +166,10 @@ func replayConfig(in replayInput, config EvictionConfig, noTrim bool) replayMetr
 		state.rebuildLocked(in.branch[:in.prefixEnds[k]])
 
 		realTokens := in.realTokens[k]
+		if realTokens > in.window {
+			m.overflowTurns++
+		}
+
 		toReplace := make(map[string]struct{})
 		if !noTrim {
 			toReplace = SelectEvictionCandidates(EvictionRequest{
@@ -202,16 +222,6 @@ func replayConfig(in replayInput, config EvictionConfig, noTrim bool) replayMetr
 		}
 		m.contextCost += newTokens*inputPricePerToken + cachedTokens*cacheReadPricePerToken
 
-		if debug && k < 40 {
-			newCount := 0
-			for p := range toReplace {
-				if _, was := prevEvicted[p]; !was {
-					newCount++
-				}
-			}
-			fmt.Printf("turn=%3d point=%3d prev=%3d arch=%3d realTok=%d replace=%3d new=%2d first=%3d compTok=%d\n", k, point, prevCount, len(state.activeArchives), realTokens, len(toReplace), newCount, firstChange, int(compiledTokens))
-		}
-
 		m.untrimmedTokens += int(float64(untrimmedChars) / approxCharsPerTokenReplay)
 		m.compiledTokens += int(compiledTokens)
 		m.savedTokens += int((float64(untrimmedChars) - float64(compiledChars)) / approxCharsPerTokenReplay)
@@ -234,7 +244,6 @@ func replayConfig(in replayInput, config EvictionConfig, noTrim bool) replayMetr
 		prevCount = point
 	}
 
-	// Baseline: no replacements; the cache only grows with new messages.
 	lastTokens := 0
 	for _, point := range in.points {
 		compiledTokens := float64(in.msgCharPrefix[point]) / approxCharsPerTokenReplay
@@ -307,22 +316,13 @@ func configName(config EvictionConfig) string {
 }
 
 func configGrid() []EvictionConfig {
-	if os.Getenv("PIG_REPLAY_DEBUG") != "" {
-		return []EvictionConfig{DefaultEvictionConfig()}
-	}
 	var out []EvictionConfig
-	for _, threshold := range []float64{0.4, 0.5, 0.6, 0.7} {
-		for _, batch := range []int{2000, 4000, 8000, 16000} {
-			for _, percentKnee := range []float64{0.3, 0.45, 0.6} {
-				for _, absoluteKnee := range []int{65_000, 130_000} {
-					config := DefaultEvictionConfig()
-					config.Threshold = threshold
-					config.MinBatchTokens = batch
-					config.PressurePercentKnee = percentKnee
-					config.PressureAbsoluteKnee = absoluteKnee
-					out = append(out, config)
-				}
-			}
+	for _, threshold := range []float64{0.3, 0.4, 0.5, 0.6, 0.7} {
+		for _, batch := range []int{4000, 8000} {
+			config := DefaultEvictionConfig()
+			config.Threshold = threshold
+			config.MinBatchTokens = batch
+			out = append(out, config)
 		}
 	}
 	return out
