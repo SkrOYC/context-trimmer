@@ -132,6 +132,44 @@ func truncationValue(value any) *truncation {
 	}
 }
 
+// toolResultEventFromMessage builds the archive-relevant event from a persisted
+// toolResult message and the arguments of the tool call that produced it.
+func toolResultEventFromMessage(message, args map[string]any) toolResultEvent {
+	return toolResultEvent{
+		ToolName:   stringValue(message["toolName"]),
+		ToolCallID: stringValue(message["toolCallId"]),
+		Input:      args,
+		Content:    contentBlocksValue(message["content"]),
+		Details:    toolResultDetails{Truncation: truncationValue(message["details"])},
+		IsError:    boolValue(message["isError"]),
+	}
+}
+
+// collectToolCallArguments records each assistant tool call's arguments by id so
+// a later toolResult can be backfilled with the same parameter key and start
+// line the live path would have used.
+func collectToolCallArguments(message map[string]any, out map[string]map[string]any) {
+	content, ok := message["content"].([]any)
+	if !ok {
+		return
+	}
+	for _, block := range content {
+		part, ok := block.(map[string]any)
+		if !ok {
+			continue
+		}
+		if part["type"] != "toolCall" && part["type"] != "tool_use" {
+			continue
+		}
+		id := stringValue(part["id"])
+		if id == "" {
+			continue
+		}
+		args, _ := part["arguments"].(map[string]any)
+		out[id] = args
+	}
+}
+
 // ToolPolicy is one row of the archiving policy table: which tools are archived,
 // how their content is extracted, and how validity is decided.
 type ToolPolicy struct {
@@ -169,7 +207,13 @@ func extractReadContent(ev toolResultEvent) (string, bool) {
 		}
 		return t.Content, true
 	}
-	return StripReadFooters(joinTextContent(ev.Content)), true
+	text := joinTextContent(ev.Content)
+	// Persisted results strip `details`, so recover the oversized-line skip from
+	// the warning text itself.
+	if isOversizedLineWarning(text) {
+		return "", false
+	}
+	return StripReadFooters(text), true
 }
 
 func getReadParameterKey(input map[string]any) (string, bool) {

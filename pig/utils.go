@@ -135,6 +135,12 @@ var readFooterPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`^\[Line \d+ is [\d.]+[KMGT]?B, exceeds \d+(?:\.\d+)?[KMGT]?B limit\. Use bash: .*\]$`),
 }
 
+// isOversizedLineWarning reports whether text is the read tool's single-line
+// "too large to return" warning rather than file content.
+func isOversizedLineWarning(text string) bool {
+	return readFooterPatterns[3].MatchString(strings.TrimSpace(text))
+}
+
 // StripReadFooters removes a trailing read-tool footer from text.
 func StripReadFooters(text string) string {
 	parts := strings.Split(text, "\n\n")

@@ -10,8 +10,7 @@ import (
 
 // handleToolResult archives a successful result of an archive-eligible tool.
 func handleToolResult(state *State, ctx sdk.Context, data map[string]any) (any, error) {
-	toolName, _ := data["toolName"].(string)
-	policy, ok := policyByTool[toolName]
+	policy, ok := policyByTool[stringValue(data["toolName"])]
 	if !ok {
 		return nil, nil
 	}
@@ -19,30 +18,42 @@ func handleToolResult(state *State, ctx sdk.Context, data map[string]any) (any, 
 	// Failed tool calls carry an error string, not recallable content. Skip them
 	// entirely: archiving the text would line-hash the error and, for reads,
 	// record the offending path as file-backed.
-	if isError, _ := data["isError"].(bool); isError {
+	if boolValue(data["isError"]) {
 		return nil, nil
 	}
 
 	state.Rebuild(ctx)
 
-	ev := decodeToolResultEvent(data)
+	arc, ok := buildArchiveRecord(policy, decodeToolResultEvent(data), data["content"])
+	if !ok {
+		return nil, nil
+	}
+	if err := ctx.AppendEntry(ArchiveType, arc); err != nil {
+		warnf("archive %s: append entry: %v", arc.ToolName, err)
+		return nil, nil
+	}
+	state.Register(arc)
+	return nil, nil
+}
 
+// buildArchiveRecord builds the archive payload for a tool result. It returns
+// false when the result has no archivable content or no resolvable parameter.
+func buildArchiveRecord(policy ToolPolicy, ev toolResultEvent, rawContent any) (ArchivedResult, bool) {
 	content, ok := policy.ExtractContent(ev)
 	if !ok {
 		// No archivable content (e.g. oversized first line / empty result).
-		return nil, nil
+		return ArchivedResult{}, false
 	}
 	parameterKey, ok := policy.GetParameterKey(ev.Input)
 	if !ok || parameterKey == "" {
-		return nil, nil
+		return ArchivedResult{}, false
 	}
 
 	// Store the raw content blocks verbatim so recall returns exactly what the
 	// tool produced.
-	original, err := json.Marshal(data["content"])
+	original, err := json.Marshal(rawContent)
 	if err != nil {
-		warnf("archive %s: marshal content: %v", toolName, err)
-		return nil, nil
+		return ArchivedResult{}, false
 	}
 
 	lines := strings.Split(content, "\n")
@@ -51,7 +62,7 @@ func handleToolResult(state *State, ctx sdk.Context, data map[string]any) (any, 
 		lineHashes[i] = GetHash(line)
 	}
 
-	arc := ArchivedResult{
+	return ArchivedResult{
 		LineHashes:           lineHashes,
 		OriginalContent:      string(original),
 		ParameterKey:         parameterKey,
@@ -62,13 +73,7 @@ func handleToolResult(state *State, ctx sdk.Context, data map[string]any) (any, 
 		Timestamp:            time.Now().UnixMilli(),
 		ToolCallID:           ev.ToolCallID,
 		ToolName:             ev.ToolName,
-	}
-	if err := ctx.AppendEntry(ArchiveType, arc); err != nil {
-		warnf("archive %s: append entry: %v", toolName, err)
-		return nil, nil
-	}
-	state.Register(arc)
-	return nil, nil
+	}, true
 }
 
 // archiveStartLine mirrors the TypeScript `Number(input.offset) || 1` and keeps

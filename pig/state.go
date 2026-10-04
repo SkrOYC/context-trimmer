@@ -13,6 +13,11 @@ type State struct {
 	archivesByPath  map[string][]ArchivedResult
 	ordered         []ArchivedResult
 	evictedPointers map[string]struct{}
+
+	// backfillCache keeps retroactively-built archives for tool results that
+	// predate the extension, keyed by tool call id, so a rebuild never re-hashes
+	// them. They are derived, not persisted.
+	backfillCache map[string]ArchivedResult
 }
 
 // NewState returns an empty archive index.
@@ -21,6 +26,7 @@ func NewState() *State {
 		activeArchives:  make(map[string]ArchivedResult),
 		archivesByPath:  make(map[string][]ArchivedResult),
 		evictedPointers: make(map[string]struct{}),
+		backfillCache:   make(map[string]ArchivedResult),
 	}
 }
 
@@ -49,20 +55,70 @@ func (s *State) rebuildLocked(branch []map[string]any) {
 	s.archivesByPath = make(map[string][]ArchivedResult)
 	s.ordered = nil
 
+	archivedToolCallIDs := make(map[string]struct{})
+	argsByToolCallID := make(map[string]map[string]any)
+	pending := make([]map[string]any, 0)
+
 	for _, entry := range branch {
-		if entry["type"] != "custom" || entry["customType"] != ArchiveType {
+		if entry["type"] == "custom" && entry["customType"] == ArchiveType {
+			data, ok := entry["data"].(map[string]any)
+			if !ok {
+				warnf("rebuild state: archive entry %v has non-object data", entry["id"])
+				continue
+			}
+			arc := archivedResultFromMap(data)
+			if arc.PointerID == "" {
+				warnf("rebuild state: archive entry %v is missing a pointerId", entry["id"])
+				continue
+			}
+			if arc.ToolCallID != "" {
+				archivedToolCallIDs[arc.ToolCallID] = struct{}{}
+			}
+			s.registerLocked(arc)
 			continue
 		}
-		data, ok := entry["data"].(map[string]any)
+
+		message, ok := entry["message"].(map[string]any)
 		if !ok {
-			warnf("rebuild state: archive entry %v has non-object data", entry["id"])
 			continue
 		}
-		arc := archivedResultFromMap(data)
-		if arc.PointerID == "" {
-			warnf("rebuild state: archive entry %v is missing a pointerId", entry["id"])
+		switch message["role"] {
+		case "assistant":
+			collectToolCallArguments(message, argsByToolCallID)
+		case "toolResult":
+			pending = append(pending, message)
+		}
+	}
+
+	s.backfillLocked(pending, archivedToolCallIDs, argsByToolCallID)
+}
+
+// backfillLocked retroactively archives tool results that predate the extension
+// so a resumed or newly-adopted session is trimmed as if it had been active from
+// the start. Built archives are cached by tool call id, so only the first
+// rebuild per process pays the hashing cost.
+func (s *State) backfillLocked(pending []map[string]any, archivedToolCallIDs map[string]struct{}, argsByToolCallID map[string]map[string]any) {
+	for _, message := range pending {
+		toolCallID := stringValue(message["toolCallId"])
+		if toolCallID == "" {
 			continue
 		}
+		if _, ok := archivedToolCallIDs[toolCallID]; ok {
+			continue
+		}
+		if cached, ok := s.backfillCache[toolCallID]; ok {
+			s.registerLocked(cached)
+			continue
+		}
+		policy, ok := policyByTool[stringValue(message["toolName"])]
+		if !ok || boolValue(message["isError"]) {
+			continue
+		}
+		arc, ok := buildArchiveRecord(policy, toolResultEventFromMessage(message, argsByToolCallID[toolCallID]), message["content"])
+		if !ok {
+			continue
+		}
+		s.backfillCache[toolCallID] = arc
 		s.registerLocked(arc)
 	}
 }
